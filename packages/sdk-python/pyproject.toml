@@ -1,0 +1,10 @@
+[project]
+name = "bitgo-agent-wallet"
+version = "0.1.0"
+description = "BitGo Agent Wallet Python SDK (Section 6.7 - language bindings matching BitGo's existing SDK support)"
+requires-python = ">=3.9"
+dependencies = ["requests>=2.31"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"

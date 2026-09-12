@@ -1,0 +1,16 @@
+node_modules/
+dist/
+build/
+*.log
+.env
+.env.*
+!.env.example
+.DS_Store
+coverage/
+*.tsbuildinfo
+data/*.json
+!data/.gitkeep
+__pycache__/
+*.egg-info/
+.venv/
+dist-*.tsbuildinfo

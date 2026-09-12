@@ -1,15 +1,12 @@
 import { z } from 'zod';
 
-/** Roles that can act on a master account. Maps to PRD personas (Section 3) and
- * role checks referenced throughout Section 6 ("admin/compliance role"). */
+/** Roles a user can hold within an Organization. Maps to PRD personas (Section 3).
+ * What each role can actually DO is looked up via `hasPermission` (see
+ * permissions.ts) rather than sprinkling `role === 'admin'` checks everywhere -
+ * mirroring BitGo's named-permission RBAC model (user-management-service) instead
+ * of a hardcoded role enum baked into business logic. */
 export const RoleSchema = z.enum(['admin', 'compliance', 'developer', 'viewer']);
 export type Role = z.infer<typeof RoleSchema>;
-
-export const roleCanManagePolicy = (role: Role): boolean =>
-  role === 'admin' || role === 'compliance';
-
-export const roleCanReleaseQuarantine = (role: Role): boolean =>
-  role === 'admin' || role === 'compliance';
 
 /** Standard chain scope for v1 (Section 5.1): EVM-only, EIP-7702-supporting chains. */
 export const SupportedChainSchema = z.enum(['ethereum-mainnet', 'base', 'optimism', 'arbitrum']);

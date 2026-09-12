@@ -29,6 +29,6 @@ transactionsRouter.get(
   '/',
   asyncHandler(async (req, res) => {
     const subWalletId = typeof req.query.subWalletId === 'string' ? req.query.subWalletId : undefined;
-    res.json(transactionService.listTransactions(req.user!.masterAccountId, subWalletId));
+    res.json(transactionService.listTransactions(req.enterpriseId!, subWalletId));
   }),
 );

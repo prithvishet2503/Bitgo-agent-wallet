@@ -9,9 +9,12 @@ import {
   DEFAULT_APPROVAL_TIMEOUT_MS,
   ForbiddenError,
   NotFoundError,
+  PERMISSIONS,
+  hasPermission,
   nowIso,
 } from '@bitgo-agent-wallet/shared';
-import { db, type User } from '../store/db.js';
+import type { User } from '../store/db.js';
+import { approvalDao } from '../dal/models/approval.dao.js';
 import { notify } from '../notifications/channels.js';
 
 /** Section 6.5 - Human Approval Flow. */
@@ -33,7 +36,7 @@ export function createApprovalRequest(
     id: `approval_${randomUUID()}`,
     transactionId: transaction.id,
     subWalletId: subWallet.id,
-    masterAccountId: subWallet.masterAccountId,
+    enterpriseId: subWallet.enterpriseId,
     status: 'pending',
     requiredApprovals,
     approvals: [],
@@ -57,21 +60,19 @@ export function createApprovalRequest(
     defaultAction: DEFAULT_APPROVAL_DEFAULT_ACTION,
     resolvedAt: null,
   };
-  db.approvalRequests.set(approval.id, approval);
+  approvalDao.createOrUpdate(approval);
   notify(approval.channelsNotified, approval, subWallet.agentName);
   return approval;
 }
 
 export function getApprovalRequest(id: string): ApprovalRequest {
-  const a = db.approvalRequests.get(id);
+  const a = approvalDao.get(id);
   if (!a) throw new NotFoundError(`Approval request ${id} not found`);
   return a;
 }
 
-export function listPending(masterAccountId: string): ApprovalRequest[] {
-  return [...db.approvalRequests.values()].filter(
-    (a) => a.masterAccountId === masterAccountId && a.status === 'pending',
-  );
+export function listPending(enterpriseId: string): ApprovalRequest[] {
+  return approvalDao.list((a) => a.enterpriseId === enterpriseId && a.status === 'pending');
 }
 
 export type ApprovalOutcome =
@@ -91,10 +92,10 @@ export function applyDecision(
   if (approval.status !== 'pending') {
     throw new ForbiddenError(`Approval request ${approval.id} is already ${approval.status}`);
   }
-  if (approval.masterAccountId !== actingUser.masterAccountId) {
-    throw new ForbiddenError('Cannot decide on an approval request outside your master account');
+  if (!actingUser.accessibleEnterpriseIds.includes(approval.enterpriseId)) {
+    throw new ForbiddenError('Cannot decide on an approval request outside an enterprise you have access to');
   }
-  if (actingUser.role !== 'admin' && actingUser.role !== 'compliance') {
+  if (!hasPermission(actingUser.role, PERMISSIONS.APPROVAL_DECIDE)) {
     throw new ForbiddenError('Only admin/compliance roles can approve or deny agent transactions');
   }
 
@@ -102,6 +103,7 @@ export function applyDecision(
     approval.denials.push({ userId: actingUser.id, decidedAt: nowIso(), reason });
     approval.status = 'denied';
     approval.resolvedAt = nowIso();
+    approvalDao.createOrUpdate(approval);
     return { resolution: 'denied', reason: reason ?? `Denied by ${actingUser.name}` };
   }
 
@@ -112,8 +114,10 @@ export function applyDecision(
   if (approval.approvals.length >= approval.requiredApprovals) {
     approval.status = 'approved';
     approval.resolvedAt = nowIso();
+    approvalDao.createOrUpdate(approval);
     return { resolution: 'approved' };
   }
+  approvalDao.createOrUpdate(approval);
   return { resolution: 'still_pending' };
 }
 
@@ -126,13 +130,15 @@ export function expireIfTimedOut(approval: ApprovalRequest): ApprovalOutcome | n
   if (approval.defaultAction === 'approve') {
     approval.status = 'approved';
     approval.resolvedAt = nowIso();
+    approvalDao.createOrUpdate(approval);
     return { resolution: 'approved' };
   }
   approval.status = 'expired';
   approval.resolvedAt = nowIso();
+  approvalDao.createOrUpdate(approval);
   return { resolution: 'denied', reason: 'Approval window expired (default-deny)' };
 }
 
-export function listAllPendingAcrossAccounts(): ApprovalRequest[] {
-  return [...db.approvalRequests.values()].filter((a) => a.status === 'pending');
+export function listAllPendingAcrossEnterprises(): ApprovalRequest[] {
+  return approvalDao.list((a) => a.status === 'pending');
 }

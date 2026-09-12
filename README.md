@@ -10,7 +10,11 @@ threat/sanctions screening vendor are all mocked** so the repo runs standalone
 with no external dependencies. Every governance rule from PRD Section 6 (Policy
 & Pact Engine, pre-execution checks, autonomy modes, human approval, kill switch,
 audit log, incoming-transaction quarantine, EIP-7702 gas sponsorship) is real,
-enforced business logic — not a stub.
+enforced business logic — not a stub. Its internal architecture (layering,
+account hierarchy, and how chain interaction is structured) deliberately mirrors
+the patterns used in BitGo's real microservices (`wallet-platform` and
+`user-management-service`) rather than inventing its own conventions - see
+"Architecture patterns mirrored from BitGo's real services" below.
 
 ## Architecture
 
@@ -28,6 +32,50 @@ The SDK, CLI, MCP server, and frontend are all thin clients of the same backend
 REST API, so there is exactly one implementation of the governance logic
 (`apps/backend/src/services/*`).
 
+### Account hierarchy: Organization → Enterprise → Agent Sub-Wallet
+
+Mirrors BitGo's real `user-management-service` model (`OrganizationEntity` →
+`EnterpriseEntity`, wallets as permissioned resources under an Enterprise):
+
+- **Organization** - the top-level tenant. Created via `POST /api/v1/organizations`
+  ("sign up my institution"), which also creates a first **Enterprise** and admin
+  **User** in one call and returns that user's API token.
+- **Enterprise** - what the rest of this PRD calls a "master account". An
+  Organization can have more than one (separate business units, fund entities);
+  an admin creates additional ones via `POST /api/v1/enterprises`.
+- **Agent Sub-Wallet** - nested under exactly one Enterprise (Section 6.1).
+
+A user's requests act on their home Enterprise by default; if they have access to
+more than one, they select which via the `X-Enterprise-Id` header (the console
+exposes this as the sidebar's Enterprise switcher; the SDK via
+`client.setEnterpriseId()`).
+
+### Data-access layer (DAO pattern)
+
+Services never touch storage directly - they call a `dal/models/*.dao.ts`
+singleton (`subWalletDao`, `pactDao`, `enterpriseDao`, ...) implementing a shared
+`BaseDao` interface (`apps/backend/src/dal/base.dao.ts`), mirroring
+wallet-platform's `app/dal/interfaces/base.dao.ts` + `app/dal/models/*.dao.ts`.
+Swapping the in-memory store (`apps/backend/src/store/db.ts`) for a real database
+means rewriting that one file and the DAOs' two-line bodies - no service logic
+changes.
+
+### Smart-contract interaction: build-and-queue, never inline
+
+Mirrors wallet-platform's `SendQueue` pattern: an HTTP request never signs or
+broadcasts anything itself. It validates, builds, and enqueues a
+`SendQueueEntry` (`services/sendQueueService.ts`); a background worker
+(`scheduler/sendQueueWorker.ts`, standing in for `SendQueueKafkaWorker`) dequeues
+it, signs via a narrow `Signer` interface (`services/signer.ts`, mirroring
+wallet-platform's `SingleSigKmsProvider` - the only thing allowed to touch "key
+material"), and "broadcasts" (mocked). This governs both:
+
+- **Agent sub-wallet deployment** (Section 6.1) - a new sub-wallet is created with
+  `pendingDeployment: true` and `address: null`; the worker resolves its address
+  once the (mocked) on-chain deployment completes.
+- **Transaction execution** (Sections 6.3-6.5) - a compliant/approved transaction
+  moves to `approved` (queued) before the worker flips it to `executed`.
+
 ## PRD section → code map
 
 | PRD section | Implementation |
@@ -41,9 +89,12 @@ REST API, so there is exactly one implementation of the governance logic
 | 6.7 Developer Tooling | `packages/sdk`, `packages/sdk-python`, `apps/cli`, `apps/mcp-server` |
 | 6.8 Audit & Compliance | `apps/backend/src/services/auditService.ts` |
 | 6.9 Incoming Transaction Screening | `apps/backend/src/services/incomingScreeningService.ts` |
-| 6.10 Gas Sponsorship (EIP-7702) | `apps/backend/src/services/gasSponsorshipService.ts` |
+| 6.10 Gas Sponsorship (EIP-7702) | `apps/backend/src/services/gasSponsorshipService.ts`, `signer.ts`, `sendQueueService.ts` |
+| RBAC (named permissions) | `packages/shared/src/types/permissions.ts` |
+| Organization/Enterprise signup | `apps/backend/src/services/organizationService.ts`, `enterpriseService.ts` |
 
-Every service file has a doc comment citing the exact PRD section it implements.
+Every service file has a doc comment citing the exact PRD section (or BitGo
+microservice pattern) it implements.
 
 ## Running it
 
@@ -52,7 +103,7 @@ npm install
 npm run build          # builds packages/shared -> packages/sdk -> everything else, in order
 ```
 
-Start the backend (seeds demo master account + 4 role-scoped users):
+Start the backend (seeds a demo Organization/Enterprise + 4 role-scoped users):
 
 ```bash
 npm run dev:backend    # http://localhost:4000
@@ -66,17 +117,21 @@ npm run dev:frontend   # http://localhost:5173, proxies /api to :4000
 
 Log in with one of the seeded demo tokens (shown on the login screen):
 `demo-admin-token`, `demo-compliance-token`, `demo-dev-token`, `demo-viewer-token`.
+Or use the **Create organization** tab to sign up a brand-new tenant from scratch.
 
 ### CLI
 
 ```bash
 cd apps/cli
 node dist/index.js authenticate demo-admin-token
+# or: node dist/index.js create-organization --organization-name "Acme" --enterprise-name "Acme Treasury" --admin-name "You"
 node dist/index.js create-agent-wallet --name "Treasury Bot" --allocated-balance 50000 --autonomy-mode bounded_auto
 node dist/index.js create-pact --sub-wallet-id <id> --max-tx-value 5000 --daily-cap 20000 --weekly-cap 50000
 node dist/index.js send --sub-wallet-id <id> --to 0xdest1 --value-usd 1000
 node dist/index.js get-status --transaction-id <id>
 node dist/index.js revoke --sub-wallet-id <id> --reason "compromised key"
+node dist/index.js create-enterprise --name "Trading Desk"   # additional Enterprise under your Organization
+node dist/index.js use-enterprise --enterprise-id <id>       # switch which one commands act on
 ```
 
 ### MCP server
@@ -91,28 +146,41 @@ create sub-wallets, submit transactions, and check status/balance directly.
 
 ## Demo flow worth trying
 
-1. Log in as **Ava Admin** (admin).
-2. Create an agent sub-wallet in **Bounded Auto** mode.
+1. Log in as **Ava Admin** (admin), or use **Create organization** to sign up fresh.
+2. Create an agent sub-wallet in **Bounded Auto** mode - note its address shows
+   "Pending" for a moment while the SendQueue worker "deploys" it.
 3. Create a Pact with a low max-transaction-value cap.
-4. Submit a transaction under the cap → auto-executes immediately.
+4. Submit a transaction under the cap → status goes `approved` → `executed`
+   within ~1.5s as the SendQueue worker picks it up.
 5. Submit a transaction over the cap → escalates to **Approvals** with the
    specific policy violation shown; approve or deny it there.
 6. Try sending to `0xsanctioned0001` → hard-blocked by screening regardless of
    autonomy mode.
 7. Record an incoming transaction from `0xsanctioned0001` on the sub-wallet
    detail page → it's quarantined; release it from **Incoming Quarantine**.
-8. Check **Audit Log** - every step above is there, immutably.
+8. Check **Audit Log** - every step above is there, immutably, including the
+   `SUB_WALLET_DEPLOYMENT_QUEUED` / `SUB_WALLET_DEPLOYED` and
+   `TRANSACTION_QUEUED_FOR_BROADCAST` / `TRANSACTION_EXECUTED` pairs.
+9. From the sidebar, click **+ New enterprise** to create a second Enterprise
+   under the same Organization and switch to it.
 
 ## What's intentionally mocked
 
-- **Custody**: no real MPC/HSM; sub-wallet keys are opaque string references.
-- **Chain**: no real RPC; simulation and EIP-7702 delegation are deterministic mocks.
+- **Custody**: no real MPC/HSM; sub-wallet keys are opaque string references, and
+  `services/signer.ts` returns a fake signature instead of calling a real
+  KMS/MPC signer.
+- **Chain**: no real RPC; simulation, EIP-7702 delegation, and SendQueue
+  deployment/broadcast are deterministic mocks.
 - **Screening**: `screeningService.ts` uses a small in-memory watchlist instead of
   a licensed vendor (Blockaid/Chainalysis - PRD Section 11 open question).
 - **Notifications**: Slack/mobile-push delivery are `console.log` lines
   (`apps/backend/src/notifications/channels.ts`).
 - **Persistence**: everything lives in an in-memory store
   (`apps/backend/src/store/db.ts`) that resets on restart.
+- **RBAC**: one role per user (`packages/shared/src/types/permissions.ts` maps
+  role → permission strings) rather than BitGo's full per-enterprise
+  Role/Permission/Resource join-table system.
 
-Swapping any of these for the real thing only touches the one file listed above -
-no service's governance logic needs to change.
+Swapping any of these for the real thing touches only the file(s) listed above -
+no other service's governance logic needs to change, by design (DAO layer +
+narrow Signer/SendQueue interfaces).

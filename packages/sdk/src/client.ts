@@ -5,8 +5,12 @@ import type {
   AuditLogQuery,
   AutonomyMode,
   CreateAgentSubWalletInput,
+  CreateEnterpriseRequestInput,
+  CreateOrganizationInput,
   CreatePactInput,
+  Enterprise,
   IncomingTransaction,
+  Organization,
   Pact,
   ReleaseQuarantineInput,
   SimulateIncomingTransactionInput,
@@ -17,6 +21,7 @@ import type {
 export interface BitGoAgentWalletClientOptions {
   baseUrl?: string;
   apiToken?: string;
+  enterpriseId?: string;
   fetchImpl?: typeof fetch;
 }
 
@@ -24,7 +29,18 @@ export interface AuthenticatedIdentity {
   userId: string;
   name: string;
   role: string;
-  masterAccountId: string;
+  organizationId: string;
+  /** Home enterprise, used when no `X-Enterprise-Id` header is set. */
+  enterpriseId: string;
+  /** Every Enterprise this identity may act on (see setEnterpriseId). */
+  accessibleEnterpriseIds: string[];
+  apiToken: string;
+}
+
+export interface BootstrapOrganizationResult {
+  organization: Organization;
+  enterprise: Enterprise;
+  userId: string;
   apiToken: string;
 }
 
@@ -38,11 +54,13 @@ export interface AuthenticatedIdentity {
 export class BitGoAgentWalletClient {
   private baseUrl: string;
   private apiToken: string | undefined;
+  private enterpriseId: string | undefined;
   private fetchImpl: typeof fetch;
 
   constructor(options: BitGoAgentWalletClientOptions = {}) {
     this.baseUrl = options.baseUrl ?? 'http://localhost:4000/api/v1';
     this.apiToken = options.apiToken;
+    this.enterpriseId = options.enterpriseId;
     // Bind to globalThis: browsers' native fetch throws "Illegal invocation" if
     // called without `window` as the receiver, which happens once `fetch` is
     // stored as a bare method reference on this class instance.
@@ -53,12 +71,20 @@ export class BitGoAgentWalletClient {
     this.apiToken = token;
   }
 
+  /** Selects which Enterprise subsequent requests act on (sent as the
+   * `X-Enterprise-Id` header) - only meaningful when the current identity has
+   * access to more than one. */
+  setEnterpriseId(enterpriseId: string): void {
+    this.enterpriseId = enterpriseId;
+  }
+
   private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
     const res = await this.fetchImpl(`${this.baseUrl}${path}`, {
       method,
       headers: {
         'content-type': 'application/json',
         ...(this.apiToken ? { authorization: `Bearer ${this.apiToken}` } : {}),
+        ...(this.enterpriseId ? { 'x-enterprise-id': this.enterpriseId } : {}),
       },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
@@ -75,11 +101,33 @@ export class BitGoAgentWalletClient {
   async authenticate(apiToken: string): Promise<AuthenticatedIdentity> {
     const identity = await this.request<AuthenticatedIdentity>('POST', '/auth/authenticate', { apiToken });
     this.setApiToken(identity.apiToken);
+    this.setEnterpriseId(identity.enterpriseId);
     return identity;
   }
 
+  // --- "Sign up my institution": Organization -> Enterprise -> admin User ---
+  async createOrganization(input: CreateOrganizationInput): Promise<BootstrapOrganizationResult> {
+    const result = await this.request<BootstrapOrganizationResult>('POST', '/organizations', input);
+    this.setApiToken(result.apiToken);
+    this.setEnterpriseId(result.enterprise.id);
+    return result;
+  }
+
+  // --- An Organization can contain more than one Enterprise ---
+  async createEnterprise(input: Omit<CreateEnterpriseRequestInput, 'organizationId'>): Promise<Enterprise> {
+    return this.request('POST', '/enterprises', input);
+  }
+
+  async listEnterprises(): Promise<Enterprise[]> {
+    return this.request('GET', '/enterprises');
+  }
+
+  async getEnterprise(id: string): Promise<Enterprise> {
+    return this.request('GET', `/enterprises/${id}`);
+  }
+
   // --- Section 6.1: Agent Sub-Wallet Creation ---
-  async createAgentSubWallet(input: Omit<CreateAgentSubWalletInput, 'masterAccountId'>): Promise<AgentSubWallet> {
+  async createAgentSubWallet(input: Omit<CreateAgentSubWalletInput, 'enterpriseId'>): Promise<AgentSubWallet> {
     return this.request('POST', '/sub-wallets', input);
   }
 
@@ -164,7 +212,7 @@ export class BitGoAgentWalletClient {
   }
 
   // --- Section 6.8: Audit & Compliance ---
-  async queryAuditLog(query: Omit<AuditLogQuery, 'masterAccountId'>): Promise<AuditLogEntry[]> {
+  async queryAuditLog(query: Omit<AuditLogQuery, 'enterpriseId'>): Promise<AuditLogEntry[]> {
     const params = new URLSearchParams();
     for (const [key, value] of Object.entries(query)) {
       if (value !== undefined) params.set(key, String(value));

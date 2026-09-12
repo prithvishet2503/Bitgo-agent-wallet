@@ -11,7 +11,7 @@ export type QuarantineStatus = z.infer<typeof QuarantineStatusSchema>;
 export const IncomingTransactionSchema = z.object({
   id: z.string(),
   subWalletId: z.string(),
-  masterAccountId: z.string(),
+  enterpriseId: z.string(),
   fromAddress: z.string(),
   valueUsd: z.number().nonnegative(),
   network: z.string(),

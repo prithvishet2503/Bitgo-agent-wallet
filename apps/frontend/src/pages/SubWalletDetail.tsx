@@ -67,9 +67,12 @@ export function SubWalletDetail(): ReactElement {
       <div className="page-header">
         <div>
           <h1>{subWallet.agentName}</h1>
-          <p className="page-subtitle mono">{subWallet.address}</p>
+          <p className="page-subtitle mono">
+            {subWallet.pendingDeployment ? 'Deploying on-chain smart account...' : subWallet.address}
+          </p>
         </div>
         <div className="header-actions">
+          {subWallet.pendingDeployment && <StatusBadge value="pending" />}
           <StatusBadge value={subWallet.status} />
           <StatusBadge value={subWallet.autonomyMode} />
         </div>

@@ -1,6 +1,7 @@
 import type { ReactElement } from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { EnterpriseSwitcher } from './EnterpriseSwitcher';
 
 const NAV_ITEMS = [
   { to: '/sub-wallets', label: 'Agent Sub-Wallets' },
@@ -22,6 +23,7 @@ export function Layout(): ReactElement {
             <div className="brand-tag">Governed autonomy</div>
           </div>
         </div>
+        <EnterpriseSwitcher />
         <nav>
           {NAV_ITEMS.map((item) => (
             <NavLink key={item.to} to={item.to} className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}>

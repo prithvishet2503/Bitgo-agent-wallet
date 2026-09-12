@@ -22,15 +22,23 @@ class BitGoAgentWalletApiError(Exception):
 
 
 class BitGoAgentWalletClient:
-    def __init__(self, base_url: str = "http://localhost:4000/api/v1", api_token: Optional[str] = None):
+    def __init__(
+        self,
+        base_url: str = "http://localhost:4000/api/v1",
+        api_token: Optional[str] = None,
+        enterprise_id: Optional[str] = None,
+    ):
         self.base_url = base_url.rstrip("/")
         self.api_token = api_token
+        self.enterprise_id = enterprise_id
         self.session = requests.Session()
 
     def _request(self, method: str, path: str, json: Optional[dict] = None) -> Any:
         headers = {}
         if self.api_token:
             headers["authorization"] = f"Bearer {self.api_token}"
+        if self.enterprise_id:
+            headers["x-enterprise-id"] = self.enterprise_id
         resp = self.session.request(method, f"{self.base_url}{path}", json=json, headers=headers)
         body = resp.json() if resp.text else None
         if not resp.ok:
@@ -47,7 +55,22 @@ class BitGoAgentWalletClient:
     def authenticate(self, api_token: str) -> dict:
         identity = self._request("POST", "/auth/authenticate", {"apiToken": api_token})
         self.api_token = identity["apiToken"]
+        self.enterprise_id = identity["enterpriseId"]
         return identity
+
+    # --- "Sign up my institution": Organization -> Enterprise -> admin User ---
+    def create_organization(self, **input: Any) -> dict:
+        result = self._request("POST", "/organizations", input)
+        self.api_token = result["apiToken"]
+        self.enterprise_id = result["enterprise"]["id"]
+        return result
+
+    # --- An Organization can contain more than one Enterprise ---
+    def create_enterprise(self, **input: Any) -> dict:
+        return self._request("POST", "/enterprises", input)
+
+    def list_enterprises(self) -> list[dict]:
+        return self._request("GET", "/enterprises")
 
     # --- Section 6.1 ---
     def create_agent_sub_wallet(self, **input: Any) -> dict:

@@ -1,6 +1,7 @@
 import type { NextFunction, Request, Response } from 'express';
 import { ForbiddenError } from '@bitgo-agent-wallet/shared';
-import { db, type User } from '../store/db.js';
+import type { User } from '../store/db.js';
+import { userDao } from '../dal/models/user.dao.js';
 
 declare global {
   // eslint-disable-next-line @typescript-eslint/no-namespace
@@ -18,7 +19,7 @@ declare global {
 export function authMiddleware(req: Request, _res: Response, next: NextFunction): void {
   const header = req.header('authorization') ?? '';
   const token = header.startsWith('Bearer ') ? header.slice('Bearer '.length) : header;
-  const user = db.usersByToken.get(token);
+  const user = userDao.getByToken(token);
   if (!user) {
     next(new ForbiddenError('Missing or invalid API token. Call authenticate() first.'));
     return;

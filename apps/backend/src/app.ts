@@ -1,6 +1,8 @@
 import cors from 'cors';
 import express, { type Express } from 'express';
 import { authRouter } from './routes/auth.js';
+import { organizationsRouter } from './routes/organizations.js';
+import { enterprisesRouter } from './routes/enterprises.js';
 import { subWalletsRouter } from './routes/subWallets.js';
 import { pactsRouter } from './routes/pacts.js';
 import { transactionsRouter } from './routes/transactions.js';
@@ -8,6 +10,7 @@ import { approvalsRouter } from './routes/approvals.js';
 import { auditLogRouter } from './routes/auditLog.js';
 import { incomingRouter } from './routes/incoming.js';
 import { authMiddleware } from './middleware/auth.js';
+import { resolveEnterprise } from './middleware/enterprise.js';
 import { errorHandler } from './middleware/errorHandler.js';
 
 /**
@@ -22,10 +25,17 @@ export function createApp(): Express {
 
   app.get('/health', (_req, res) => res.json({ status: 'ok', service: 'bitgo-agent-wallet-backend' }));
 
+  // Public - no API token exists yet ("sign up my institution").
   app.use('/api/v1/auth', authRouter);
+  app.use('/api/v1/organizations', organizationsRouter);
 
-  // Everything below requires authentication.
+  // Everything below requires authentication...
   app.use('/api/v1', authMiddleware);
+  app.use('/api/v1/enterprises', enterprisesRouter);
+
+  // ...and everything below also resolves which Enterprise the request acts on
+  // (Section: Organization -> Enterprise hierarchy; X-Enterprise-Id header).
+  app.use('/api/v1', resolveEnterprise);
   app.use('/api/v1/sub-wallets', subWalletsRouter);
   app.use('/api/v1/pacts', pactsRouter);
   app.use('/api/v1/transactions', transactionsRouter);

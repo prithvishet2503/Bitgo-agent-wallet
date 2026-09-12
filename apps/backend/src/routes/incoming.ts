@@ -20,7 +20,7 @@ incomingRouter.post(
 incomingRouter.get(
   '/quarantined',
   asyncHandler(async (req, res) => {
-    res.json(incomingScreeningService.listQuarantined(req.user!.masterAccountId));
+    res.json(incomingScreeningService.listQuarantined(req.enterpriseId!));
   }),
 );
 

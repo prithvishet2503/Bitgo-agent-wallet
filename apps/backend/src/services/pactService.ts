@@ -7,10 +7,14 @@ import {
   type TransactionRequestInput,
   ForbiddenError,
   NotFoundError,
+  PERMISSIONS,
+  hasPermission,
   nowIso,
-  roleCanManagePolicy,
 } from '@bitgo-agent-wallet/shared';
-import { db, type User } from '../store/db.js';
+import type { User } from '../store/db.js';
+import { pactDao } from '../dal/models/pact.dao.js';
+import { subWalletDao } from '../dal/models/subWallet.dao.js';
+import { transactionDao } from '../dal/models/transaction.dao.js';
 import * as auditService from './auditService.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -20,7 +24,7 @@ const WEEK_MS = 7 * DAY_MS;
  * "Policies must be editable only by users with admin/compliance role; agents cannot
  * self-modify policy." */
 export function createPact(input: CreatePactInput, actingUser: User): Pact {
-  if (!roleCanManagePolicy(actingUser.role)) {
+  if (!hasPermission(actingUser.role, PERMISSIONS.POLICY_MANAGE)) {
     throw new ForbiddenError('Only admin/compliance roles can create a Pact');
   }
   const id = `pact_${randomUUID()}`;
@@ -32,13 +36,16 @@ export function createPact(input: CreatePactInput, actingUser: User): Pact {
     updatedAt: nowIso(),
     updatedByUserId: actingUser.id,
   };
-  db.pacts.set(id, pact);
+  pactDao.createOrUpdate(pact);
 
-  const subWallet = db.subWallets.get(input.subWalletId);
-  if (subWallet) subWallet.pactId = id;
+  const subWallet = subWalletDao.get(input.subWalletId);
+  if (subWallet) {
+    subWallet.pactId = id;
+    subWalletDao.createOrUpdate(subWallet);
+  }
 
   auditService.record({
-    masterAccountId: subWallet?.masterAccountId ?? 'unknown',
+    enterpriseId: subWallet?.enterpriseId ?? 'unknown',
     subWalletId: input.subWalletId,
     eventType: 'PACT_CREATED',
     actorUserId: actingUser.id,
@@ -51,15 +58,16 @@ export function createPact(input: CreatePactInput, actingUser: User): Pact {
 }
 
 export function updatePact(pactId: string, patch: Partial<CreatePactInput>, actingUser: User): Pact {
-  const pact = db.pacts.get(pactId);
+  const pact = pactDao.get(pactId);
   if (!pact) throw new NotFoundError(`Pact ${pactId} not found`);
-  if (!roleCanManagePolicy(actingUser.role)) {
+  if (!hasPermission(actingUser.role, PERMISSIONS.POLICY_MANAGE)) {
     throw new ForbiddenError('Only admin/compliance roles can update a Pact');
   }
   Object.assign(pact, patch, { updatedAt: nowIso(), updatedByUserId: actingUser.id });
+  pactDao.createOrUpdate(pact);
 
   auditService.record({
-    masterAccountId: actingUser.masterAccountId,
+    enterpriseId: actingUser.enterpriseId,
     subWalletId: pact.subWalletId,
     eventType: 'PACT_UPDATED',
     actorUserId: actingUser.id,
@@ -72,19 +80,18 @@ export function updatePact(pactId: string, patch: Partial<CreatePactInput>, acti
 }
 
 export function getPact(pactId: string): Pact {
-  const pact = db.pacts.get(pactId);
+  const pact = pactDao.get(pactId);
   if (!pact) throw new NotFoundError(`Pact ${pactId} not found`);
   return pact;
 }
 
 export function getPactForSubWallet(subWalletId: string): Pact | null {
-  return [...db.pacts.values()].find((p) => p.subWalletId === subWalletId) ?? null;
+  return pactDao.list((p) => p.subWalletId === subWalletId)[0] ?? null;
 }
 
 function committedSpendSince(subWalletId: string, sinceMs: number): number {
-  return [...db.transactions.values()]
-    .filter((t) => t.subWalletId === subWalletId)
-    .filter((t) => t.status === 'approved' || t.status === 'executed')
+  return transactionDao
+    .list((t) => t.subWalletId === subWalletId && (t.status === 'approved' || t.status === 'executed'))
     .filter((t) => Date.parse(t.createdAt) >= sinceMs)
     .reduce((sum, t) => sum + t.request.valueUsd, 0);
 }

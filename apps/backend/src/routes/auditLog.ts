@@ -10,7 +10,7 @@ auditLogRouter.get(
   '/',
   asyncHandler(async (req, res) => {
     const query = AuditLogQuerySchema.parse({
-      masterAccountId: req.user!.masterAccountId,
+      enterpriseId: req.enterpriseId!,
       subWalletId: req.query.subWalletId,
       eventType: req.query.eventType,
       from: req.query.from,
@@ -26,7 +26,7 @@ auditLogRouter.get(
 auditLogRouter.get(
   '/export.csv',
   asyncHandler(async (req, res) => {
-    const csv = auditService.exportCsv(req.user!.masterAccountId);
+    const csv = auditService.exportCsv(req.enterpriseId!);
     res.type('text/csv').send(csv);
   }),
 );

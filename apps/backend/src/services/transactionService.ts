@@ -9,27 +9,35 @@ import {
   NotFoundError,
   nowIso,
 } from '@bitgo-agent-wallet/shared';
-import { db, type User } from '../store/db.js';
+import type { User } from '../store/db.js';
+import { transactionDao } from '../dal/models/transaction.dao.js';
 import * as subWalletService from './subWalletService.js';
 import * as pactService from './pactService.js';
 import * as simulationService from './simulationService.js';
 import * as screeningService from './screeningService.js';
 import * as gasSponsorshipService from './gasSponsorshipService.js';
 import * as approvalService from './approvalService.js';
+import * as sendQueueService from './sendQueueService.js';
 import * as auditService from './auditService.js';
+import type { Signer } from './signer.js';
 
 /**
  * Orchestrates the full agent-transaction lifecycle described across Sections
  * 6.2-6.5 and 6.10: pre-execution checks -> policy evaluation -> autonomy-mode
- * routing -> (auto-execute | human approval) -> gas sponsorship -> execution.
- * Every step is audit-logged (Section 6.8) as it happens.
+ * routing -> (auto-proceed | human approval) -> gas-sponsorship decision ->
+ * SendQueue. Mirrors wallet-platform's `send.ts`: everything up through deciding
+ * *that* a transaction should go out happens inline in the request; actually
+ * signing and broadcasting happens later, off a `SendQueueEntry`
+ * (`completeBroadcast`, called by scheduler/sendQueueWorker.ts) - never
+ * synchronously inside the HTTP request. Every step is audit-logged (Section 6.8)
+ * as it happens.
  */
 
-function newRecordShell(request: TransactionRequestInput, subWallet: { id: string; masterAccountId: string }): TransactionRecord {
+function newRecordShell(request: TransactionRequestInput, subWallet: { id: string; enterpriseId: string }): TransactionRecord {
   return {
     id: `tx_${randomUUID()}`,
     subWalletId: subWallet.id,
-    masterAccountId: subWallet.masterAccountId,
+    enterpriseId: subWallet.enterpriseId,
     request,
     status: 'pending_approval', // placeholder, overwritten before returning
     simulation: null,
@@ -44,21 +52,21 @@ function newRecordShell(request: TransactionRequestInput, subWallet: { id: strin
   };
 }
 
-function assertSameAccount(masterAccountId: string, actingUser: User): void {
-  if (masterAccountId !== actingUser.masterAccountId) {
-    throw new ForbiddenError('Cannot act on a resource outside your master account');
+function assertAccessible(enterpriseId: string, actingUser: User): void {
+  if (!actingUser.accessibleEnterpriseIds.includes(enterpriseId)) {
+    throw new ForbiddenError('Cannot act on a resource outside an enterprise you have access to');
   }
 }
 
 export function submitTransaction(request: TransactionRequestInput, actingUser: User): TransactionRecord {
   const subWallet = subWalletService.getSubWallet(request.subWalletId);
-  assertSameAccount(subWallet.masterAccountId, actingUser);
+  assertAccessible(subWallet.enterpriseId, actingUser);
 
   const record = newRecordShell(request, subWallet);
-  db.transactions.set(record.id, record);
+  transactionDao.createOrUpdate(record);
 
   auditService.record({
-    masterAccountId: subWallet.masterAccountId,
+    enterpriseId: subWallet.enterpriseId,
     subWalletId: subWallet.id,
     eventType: 'TRANSACTION_SUBMITTED',
     actorUserId: actingUser.id,
@@ -72,8 +80,9 @@ export function submitTransaction(request: TransactionRequestInput, actingUser: 
     record.policyViolations = [{ code: 'SUB_WALLET_SUSPENDED', message: `Sub-wallet ${subWallet.agentName} is suspended` }];
     record.status = 'policy_denied';
     record.decidedAt = nowIso();
+    transactionDao.createOrUpdate(record);
     auditService.record({
-      masterAccountId: subWallet.masterAccountId,
+      enterpriseId: subWallet.enterpriseId,
       subWalletId: subWallet.id,
       eventType: 'TRANSACTION_POLICY_DENIED',
       actorUserId: null,
@@ -88,7 +97,7 @@ export function submitTransaction(request: TransactionRequestInput, actingUser: 
   const simulation = simulationService.simulate(request);
   record.simulation = simulation;
   auditService.record({
-    masterAccountId: subWallet.masterAccountId,
+    enterpriseId: subWallet.enterpriseId,
     subWalletId: subWallet.id,
     eventType: 'TRANSACTION_SIMULATED',
     actorUserId: null,
@@ -99,6 +108,7 @@ export function submitTransaction(request: TransactionRequestInput, actingUser: 
   if (!simulation.willSucceed) {
     record.status = 'simulation_failed';
     record.decidedAt = nowIso();
+    transactionDao.createOrUpdate(record);
     return record;
   }
 
@@ -109,8 +119,9 @@ export function submitTransaction(request: TransactionRequestInput, actingUser: 
   if (screening.verdict === 'flagged') {
     record.status = 'screening_blocked';
     record.decidedAt = nowIso();
+    transactionDao.createOrUpdate(record);
     auditService.record({
-      masterAccountId: subWallet.masterAccountId,
+      enterpriseId: subWallet.enterpriseId,
       subWalletId: subWallet.id,
       eventType: 'TRANSACTION_SCREENING_BLOCKED',
       actorUserId: null,
@@ -135,20 +146,23 @@ export function submitTransaction(request: TransactionRequestInput, actingUser: 
 
   // Section 6.4 - Autonomy Modes.
   // Strict: every transaction pauses for human approval regardless of compliance.
-  // Bounded Auto: compliant transactions auto-execute; out-of-policy transactions
-  // escalate to a human rather than being silently allowed or silently dropped.
+  // Bounded Auto: compliant transactions proceed straight to the SendQueue;
+  // out-of-policy transactions escalate to a human rather than being silently
+  // allowed or silently dropped.
   const requiresApproval = subWallet.autonomyMode === 'strict' || !evaluation.compliant;
 
   if (!requiresApproval) {
-    finalizeExecution(record, subWallet, pact, { auto: true });
+    queueForBroadcast(record, subWallet, pact, { auto: true });
     return record;
   }
 
   record.status = 'pending_approval';
+  transactionDao.createOrUpdate(record);
   const approval = approvalService.createApprovalRequest(record, subWallet, simulation);
   record.approvalRequestId = approval.id;
+  transactionDao.createOrUpdate(record);
   auditService.record({
-    masterAccountId: subWallet.masterAccountId,
+    enterpriseId: subWallet.enterpriseId,
     subWalletId: subWallet.id,
     eventType: 'APPROVAL_REQUESTED',
     actorUserId: null,
@@ -161,21 +175,27 @@ export function submitTransaction(request: TransactionRequestInput, actingUser: 
   return record;
 }
 
-function finalizeExecution(
+/**
+ * Marks a transaction ready to go out and enqueues a `SendQueueEntry` for it -
+ * mirrors wallet-platform's `send.ts` writing a `SendQueue` document rather than
+ * signing/broadcasting inline. Gas-sponsorship eligibility is decided here (it can
+ * still block the transaction outright per Pact config) but the ledger entry and
+ * `TRANSACTION_EXECUTED` event only land once `completeBroadcast` runs.
+ */
+function queueForBroadcast(
   record: TransactionRecord,
   subWallet: ReturnType<typeof subWalletService.getSubWallet>,
   pact: ReturnType<typeof pactService.getPact>,
   opts: { auto: boolean },
 ): void {
-  // Section 6.10 - gas sponsorship never bypasses simulation/screening (already
-  // done above); it only decides who pays, and can still block per Pact config.
   const gasDecision = gasSponsorshipService.decide(subWallet, pact, record.simulation!.estimatedFeeUsd);
 
   if (gasDecision.reason === 'cap_exceeded_blocked') {
     record.status = 'denied';
     record.decidedAt = nowIso();
+    transactionDao.createOrUpdate(record);
     auditService.record({
-      masterAccountId: subWallet.masterAccountId,
+      enterpriseId: subWallet.enterpriseId,
       subWalletId: subWallet.id,
       eventType: 'GAS_SPONSORSHIP_CAP_EXCEEDED',
       actorUserId: null,
@@ -188,11 +208,42 @@ function finalizeExecution(
 
   record.gasSponsored = gasDecision.sponsor;
   record.gasSponsorshipFallbackUsed = gasDecision.fallbackUsed;
-  if (gasDecision.sponsor) {
-    gasSponsorshipService.recordSponsorship(subWallet.id, record.id, record.simulation!.estimatedFeeUsd);
+  record.status = 'approved';
+  record.decidedAt = record.decidedAt ?? nowIso();
+  transactionDao.createOrUpdate(record);
+
+  const queueEntry = sendQueueService.enqueue({
+    enterpriseId: subWallet.enterpriseId,
+    subWalletId: subWallet.id,
+    entryType: 'transaction_broadcast',
+    relatedId: record.id,
+  });
+
+  auditService.record({
+    enterpriseId: subWallet.enterpriseId,
+    subWalletId: subWallet.id,
+    eventType: 'TRANSACTION_QUEUED_FOR_BROADCAST',
+    actorUserId: null,
+    actorType: 'system',
+    summary: `Transaction ${opts.auto ? 'auto-approved' : 'approved'} and queued for signing/broadcast`,
+    metadata: { transactionId: record.id, sendQueueEntryId: queueEntry.id, gasSponsored: record.gasSponsored },
+  });
+}
+
+/** Called by the SendQueue worker (scheduler/sendQueueWorker.ts) once a
+ * `transaction_broadcast` entry is dequeued - the only place a transaction
+ * actually flips to `executed`. Idempotent against re-processing. */
+export async function completeBroadcast(id: string, signerImpl: Signer): Promise<void> {
+  const record = getTransaction(id);
+  if (record.status !== 'approved') return;
+
+  const { signature } = await signerImpl.sign(record.subWalletId, `transfer:${record.request.valueUsd}`);
+
+  if (record.gasSponsored) {
+    gasSponsorshipService.recordSponsorship(record.subWalletId, record.id, record.simulation!.estimatedFeeUsd);
     auditService.record({
-      masterAccountId: subWallet.masterAccountId,
-      subWalletId: subWallet.id,
+      enterpriseId: record.enterpriseId,
+      subWalletId: record.subWalletId,
       eventType: 'GAS_SPONSORSHIP_APPLIED',
       actorUserId: null,
       actorType: 'system',
@@ -203,29 +254,28 @@ function finalizeExecution(
 
   record.status = 'executed';
   record.executedAt = nowIso();
-  record.decidedAt = record.decidedAt ?? nowIso();
+  transactionDao.createOrUpdate(record);
 
   auditService.record({
-    masterAccountId: subWallet.masterAccountId,
-    subWalletId: subWallet.id,
-    eventType: opts.auto ? 'TRANSACTION_AUTO_EXECUTED' : 'TRANSACTION_EXECUTED',
+    enterpriseId: record.enterpriseId,
+    subWalletId: record.subWalletId,
+    eventType: 'TRANSACTION_EXECUTED',
     actorUserId: null,
     actorType: 'system',
-    summary: `Transaction ${opts.auto ? 'auto-' : ''}executed: $${record.request.valueUsd} to ${record.request.to}`,
-    metadata: { transactionId: record.id, gasSponsored: record.gasSponsored },
+    summary: `Transaction broadcast and confirmed: $${record.request.valueUsd} to ${record.request.to}`,
+    metadata: { transactionId: record.id, signature },
   });
 }
 
 export function getTransaction(id: string): TransactionRecord {
-  const t = db.transactions.get(id);
+  const t = transactionDao.get(id);
   if (!t) throw new NotFoundError(`Transaction ${id} not found`);
   return t;
 }
 
-export function listTransactions(masterAccountId: string, subWalletId?: string): TransactionRecord[] {
-  return [...db.transactions.values()]
-    .filter((t) => t.masterAccountId === masterAccountId)
-    .filter((t) => !subWalletId || t.subWalletId === subWalletId)
+export function listTransactions(enterpriseId: string, subWalletId?: string): TransactionRecord[] {
+  return transactionDao
+    .list((t) => t.enterpriseId === enterpriseId && (!subWalletId || t.subWalletId === subWalletId))
     .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
 }
 
@@ -240,7 +290,7 @@ export function handleApprovalDecision(
 
   if (outcome.resolution === 'approved') {
     auditService.record({
-      masterAccountId: approval.masterAccountId,
+      enterpriseId: approval.enterpriseId,
       subWalletId: approval.subWalletId,
       eventType: 'APPROVAL_GRANTED',
       actorUserId: actingUser.id,
@@ -251,12 +301,13 @@ export function handleApprovalDecision(
     const subWallet = subWalletService.getSubWallet(transaction.subWalletId);
     const pact = pactService.getPact(subWallet.pactId!);
     transaction.decidedAt = nowIso();
-    finalizeExecution(transaction, subWallet, pact, { auto: false });
+    queueForBroadcast(transaction, subWallet, pact, { auto: false });
   } else if (outcome.resolution === 'denied') {
     transaction.status = 'denied';
     transaction.decidedAt = nowIso();
+    transactionDao.createOrUpdate(transaction);
     auditService.record({
-      masterAccountId: approval.masterAccountId,
+      enterpriseId: approval.enterpriseId,
       subWalletId: approval.subWalletId,
       eventType: 'APPROVAL_DENIED',
       actorUserId: actingUser.id,
@@ -271,7 +322,7 @@ export function handleApprovalDecision(
 
 /** Called by the timeout sweeper (Section 6.5 - deny-on-timeout default). */
 export function sweepExpiredApprovals(): void {
-  for (const approval of approvalService.listAllPendingAcrossAccounts()) {
+  for (const approval of approvalService.listAllPendingAcrossEnterprises()) {
     const outcome = approvalService.expireIfTimedOut(approval);
     if (!outcome) continue;
 
@@ -279,8 +330,9 @@ export function sweepExpiredApprovals(): void {
     if (outcome.resolution === 'denied') {
       transaction.status = 'denied';
       transaction.decidedAt = nowIso();
+      transactionDao.createOrUpdate(transaction);
       auditService.record({
-        masterAccountId: approval.masterAccountId,
+        enterpriseId: approval.enterpriseId,
         subWalletId: approval.subWalletId,
         eventType: 'APPROVAL_EXPIRED_DENIED',
         actorUserId: null,
@@ -291,7 +343,7 @@ export function sweepExpiredApprovals(): void {
     } else {
       const subWallet = subWalletService.getSubWallet(transaction.subWalletId);
       const pact = pactService.getPact(subWallet.pactId!);
-      finalizeExecution(transaction, subWallet, pact, { auto: false });
+      queueForBroadcast(transaction, subWallet, pact, { auto: false });
     }
   }
 }

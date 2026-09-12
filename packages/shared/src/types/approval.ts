@@ -36,7 +36,7 @@ export const ApprovalRequestSchema = z.object({
   id: z.string(),
   transactionId: z.string(),
   subWalletId: z.string(),
-  masterAccountId: z.string(),
+  enterpriseId: z.string(),
   status: ApprovalStatusSchema,
   requiredApprovals: z.number().int().positive().default(1), // multi-approver for high-value tx
   approvals: z.array(z.object({ userId: z.string(), decidedAt: z.string() })).default([]),

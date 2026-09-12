@@ -13,7 +13,7 @@ import { loadConfig, saveConfig } from './config.js';
 
 function clientFromConfig(): BitGoAgentWalletClient {
   const config = loadConfig();
-  return new BitGoAgentWalletClient({ baseUrl: config.baseUrl, apiToken: config.apiToken });
+  return new BitGoAgentWalletClient({ baseUrl: config.baseUrl, apiToken: config.apiToken, enterpriseId: config.enterpriseId });
 }
 
 function printJson(value: unknown): void {
@@ -45,8 +45,65 @@ program
     run(async () => {
       const client = new BitGoAgentWalletClient({ baseUrl: opts.baseUrl });
       const identity = await client.authenticate(apiToken);
-      saveConfig({ baseUrl: opts.baseUrl, apiToken: identity.apiToken });
-      console.log(`Authenticated as ${identity.name} (${identity.role}) on master account ${identity.masterAccountId}`);
+      saveConfig({ baseUrl: opts.baseUrl, apiToken: identity.apiToken, enterpriseId: identity.enterpriseId });
+      console.log(`Authenticated as ${identity.name} (${identity.role}) on enterprise ${identity.enterpriseId}`);
+      if (identity.accessibleEnterpriseIds.length > 1) {
+        console.log(`You also have access to: ${identity.accessibleEnterpriseIds.filter((e) => e !== identity.enterpriseId).join(', ')}`);
+        console.log('Switch with: bitgo-agent-wallet use-enterprise --enterprise-id <id>');
+      }
+    }),
+  );
+
+program
+  .command('create-organization')
+  .description('Sign up a new Organization + first Enterprise + admin user (the "create a new account" flow)')
+  .requiredOption('--organization-name <name>')
+  .requiredOption('--enterprise-name <name>')
+  .requiredOption('--admin-name <name>')
+  .option('--base-url <url>', 'API base URL', 'http://localhost:4000/api/v1')
+  .action((opts) =>
+    run(async () => {
+      const client = new BitGoAgentWalletClient({ baseUrl: opts.baseUrl });
+      const result = await client.createOrganization({
+        organizationName: opts.organizationName,
+        enterpriseName: opts.enterpriseName,
+        adminName: opts.adminName,
+      });
+      saveConfig({ baseUrl: opts.baseUrl, apiToken: result.apiToken, enterpriseId: result.enterprise.id });
+      console.log(`Organization "${result.organization.name}" created with Enterprise "${result.enterprise.name}".`);
+      console.log(`Signed in as admin - API token saved to ~/.bitgo-agent-wallet/config.json`);
+      printJson(result);
+    }),
+  );
+
+program
+  .command('create-enterprise')
+  .description('Create an additional Enterprise under your Organization (admin only)')
+  .requiredOption('--name <name>')
+  .action((opts) =>
+    run(async () => {
+      printJson(await clientFromConfig().createEnterprise({ name: opts.name }));
+    }),
+  );
+
+program
+  .command('list-enterprises')
+  .description('List Enterprises you have access to')
+  .action(() =>
+    run(async () => {
+      printJson(await clientFromConfig().listEnterprises());
+    }),
+  );
+
+program
+  .command('use-enterprise')
+  .description('Switch which Enterprise subsequent commands act on')
+  .requiredOption('--enterprise-id <id>')
+  .action((opts) =>
+    run(async () => {
+      const config = loadConfig();
+      saveConfig({ ...config, enterpriseId: opts.enterpriseId });
+      console.log(`Now acting on enterprise ${opts.enterpriseId}`);
     }),
   );
 

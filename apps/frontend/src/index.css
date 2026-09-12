@@ -93,6 +93,54 @@ select {
   color: var(--text-dim);
 }
 
+.enterprise-switcher {
+  margin-bottom: 20px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--panel-border);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.enterprise-switcher label {
+  font-size: 11px;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.enterprise-switcher select {
+  width: 100%;
+}
+
+.link-btn {
+  background: none;
+  border: none;
+  color: var(--brand-bright);
+  font-size: 12px;
+  text-align: left;
+  padding: 0;
+}
+
+.new-enterprise-form {
+  display: flex;
+  gap: 6px;
+}
+
+.new-enterprise-form input {
+  flex: 1;
+  font-size: 12px;
+  padding: 6px 8px;
+}
+
+.new-enterprise-form button {
+  background: var(--brand);
+  color: white;
+  border: none;
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
+}
+
 .sidebar nav {
   display: flex;
   flex-direction: column;
@@ -414,6 +462,30 @@ select {
   color: var(--text-dim);
   font-size: 13px;
   margin-bottom: 22px;
+}
+
+.login-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 18px;
+  background: #0e141c;
+  border-radius: 8px;
+  padding: 4px;
+}
+
+.login-tabs button {
+  flex: 1;
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.login-tabs button.active {
+  background: var(--brand);
+  color: white;
 }
 
 .login-card form {

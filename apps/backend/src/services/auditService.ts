@@ -15,7 +15,7 @@ import { db } from '../store/db.js';
  */
 
 export interface RecordAuditEventInput {
-  masterAccountId: string;
+  enterpriseId: string;
   subWalletId?: string | null;
   eventType: AuditEventType;
   actorUserId?: string | null;
@@ -27,7 +27,7 @@ export interface RecordAuditEventInput {
 export function record(input: RecordAuditEventInput): AuditLogEntry {
   const entry: AuditLogEntry = {
     id: `audit_${randomUUID()}`,
-    masterAccountId: input.masterAccountId,
+    enterpriseId: input.enterpriseId,
     subWalletId: input.subWalletId ?? null,
     eventType: input.eventType,
     actorUserId: input.actorUserId ?? null,
@@ -45,7 +45,7 @@ export function query(q: AuditLogQuery): AuditLogEntry[] {
   const fromMs = q.from ? Date.parse(q.from) : -Infinity;
   const toMs = q.to ? Date.parse(q.to) : Infinity;
   return db.auditLog
-    .filter((e) => e.masterAccountId === q.masterAccountId)
+    .filter((e) => e.enterpriseId === q.enterpriseId)
     .filter((e) => !q.subWalletId || e.subWalletId === q.subWalletId)
     .filter((e) => !q.eventType || e.eventType === q.eventType)
     .filter((e) => {
@@ -58,8 +58,8 @@ export function query(q: AuditLogQuery): AuditLogEntry[] {
 
 /** Section 6.8 - exportable log (CSV / API). SIEM integration is out of scope for
  * this prototype but the shape here is what an exporter would stream. */
-export function exportCsv(masterAccountId: string): string {
-  const rows = db.auditLog.filter((e) => e.masterAccountId === masterAccountId);
+export function exportCsv(enterpriseId: string): string {
+  const rows = db.auditLog.filter((e) => e.enterpriseId === enterpriseId);
   const header = ['id', 'timestamp', 'eventType', 'actorType', 'actorUserId', 'subWalletId', 'summary'];
   const lines = rows.map((r) =>
     [r.id, r.timestamp, r.eventType, r.actorType, r.actorUserId ?? '', r.subWalletId ?? '', JSON.stringify(r.summary)].join(','),

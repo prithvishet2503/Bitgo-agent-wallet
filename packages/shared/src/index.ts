@@ -1,4 +1,7 @@
 export * from './types/common.js';
+export * from './types/permissions.js';
+export * from './types/organization.js';
+export * from './types/enterprise.js';
 export * from './types/autonomy.js';
 export * from './types/agentSubWallet.js';
 export * from './types/pact.js';
@@ -7,3 +10,4 @@ export * from './types/approval.js';
 export * from './types/auditLog.js';
 export * from './types/incomingScreening.js';
 export * from './types/gasSponsorship.js';
+export * from './types/sendQueue.js';

@@ -1,21 +1,30 @@
 import { createContext, useCallback, useContext, useEffect, useState, type ReactElement, type ReactNode } from 'react';
-import type { AuthenticatedIdentity } from '@bitgo-agent-wallet/sdk';
-import { client, clearApiToken, hasStoredApiToken, persistApiToken } from '../api/client';
+import type { AuthenticatedIdentity, CreateOrganizationInput } from '@bitgo-agent-wallet/sdk';
+import { client, clearSession, hasStoredApiToken, persistApiToken, persistEnterpriseId } from '../api/client';
 
 interface AuthContextValue {
   identity: AuthenticatedIdentity | null;
+  /** Which Enterprise the console is currently acting on - may differ from
+   * `identity.enterpriseId` (the home enterprise) once the user switches. */
+  currentEnterpriseId: string | null;
   loading: boolean;
   error: string | null;
   login: (apiToken: string) => Promise<void>;
+  signUp: (input: CreateOrganizationInput) => Promise<void>;
+  switchEnterprise: (enterpriseId: string) => void;
   logout: () => void;
 }
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 
-/** The console's session identity. Wraps `authenticate` (Section 6.7) so every
- * page can read the current user's role without re-fetching. */
+/** The console's session identity. Wraps `authenticate` (Section 6.7) and the
+ * Organization bootstrap flow so every page can read the current user's role and
+ * active Enterprise without re-fetching. */
 export function AuthProvider({ children }: { children: ReactNode }): ReactElement {
   const [identity, setIdentity] = useState<AuthenticatedIdentity | null>(null);
+  const [currentEnterpriseId, setCurrentEnterpriseId] = useState<string | null>(
+    localStorage.getItem('bitgo-agent-wallet:enterpriseId'),
+  );
   const [loading, setLoading] = useState(hasStoredApiToken());
   const [error, setError] = useState<string | null>(null);
 
@@ -25,6 +34,8 @@ export function AuthProvider({ children }: { children: ReactNode }): ReactElemen
     try {
       const id = await client.authenticate(apiToken);
       persistApiToken(id.apiToken);
+      persistEnterpriseId(id.enterpriseId);
+      setCurrentEnterpriseId(id.enterpriseId);
       setIdentity(id);
     } catch {
       setError('Invalid API token');
@@ -34,9 +45,37 @@ export function AuthProvider({ children }: { children: ReactNode }): ReactElemen
     }
   }, []);
 
+  const signUp = useCallback(async (input: CreateOrganizationInput) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await client.createOrganization(input);
+      persistApiToken(result.apiToken);
+      persistEnterpriseId(result.enterprise.id);
+      setCurrentEnterpriseId(result.enterprise.id);
+      const id = await client.authenticate(result.apiToken); // fetch the full identity shape
+      setIdentity(id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to create organization');
+      throw err;
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const switchEnterprise = useCallback(
+    (enterpriseId: string) => {
+      if (!identity?.accessibleEnterpriseIds.includes(enterpriseId)) return;
+      persistEnterpriseId(enterpriseId);
+      setCurrentEnterpriseId(enterpriseId);
+    },
+    [identity],
+  );
+
   const logout = useCallback(() => {
-    clearApiToken();
+    clearSession();
     setIdentity(null);
+    setCurrentEnterpriseId(null);
   }, []);
 
   useEffect(() => {
@@ -52,12 +91,19 @@ export function AuthProvider({ children }: { children: ReactNode }): ReactElemen
     }
     client
       .authenticate(token)
-      .then((id) => setIdentity(id))
-      .catch(() => clearApiToken())
+      .then((id) => {
+        setIdentity(id);
+        setCurrentEnterpriseId((prev) => prev ?? id.enterpriseId);
+      })
+      .catch(() => clearSession())
       .finally(() => setLoading(false));
   }, []);
 
-  return <AuthContext.Provider value={{ identity, loading, error, login, logout }}>{children}</AuthContext.Provider>;
+  return (
+    <AuthContext.Provider value={{ identity, currentEnterpriseId, loading, error, login, signUp, switchEnterprise, logout }}>
+      {children}
+    </AuthContext.Provider>
+  );
 }
 
 export function useAuth(): AuthContextValue {

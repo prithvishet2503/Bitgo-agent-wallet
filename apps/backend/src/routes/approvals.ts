@@ -10,7 +10,7 @@ export const approvalsRouter = Router();
 approvalsRouter.get(
   '/pending',
   asyncHandler(async (req, res) => {
-    res.json(approvalService.listPending(req.user!.masterAccountId));
+    res.json(approvalService.listPending(req.enterpriseId!));
   }),
 );
 

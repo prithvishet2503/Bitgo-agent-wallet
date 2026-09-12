@@ -66,7 +66,7 @@ export type ScreeningResult = z.infer<typeof ScreeningResultSchema>;
 export const TransactionRecordSchema = z.object({
   id: z.string(),
   subWalletId: z.string(),
-  masterAccountId: z.string(),
+  enterpriseId: z.string(),
   request: TransactionRequestInputSchema,
   status: TransactionStatusSchema,
   simulation: SimulationResultSchema.nullable().default(null),

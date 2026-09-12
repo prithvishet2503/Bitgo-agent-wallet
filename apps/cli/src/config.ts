@@ -8,6 +8,10 @@ const CONFIG_PATH = join(CONFIG_DIR, 'config.json');
 export interface CliConfig {
   baseUrl: string;
   apiToken?: string;
+  /** Which Enterprise commands act on - relevant once an identity has access to
+   * more than one (see `create-enterprise`). Defaults to the identity's home
+   * enterprise when unset. */
+  enterpriseId?: string;
 }
 
 const DEFAULT_CONFIG: CliConfig = { baseUrl: 'http://localhost:4000/api/v1' };

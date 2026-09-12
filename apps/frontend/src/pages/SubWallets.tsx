@@ -131,7 +131,7 @@ export function SubWallets(): ReactElement {
                 <td>
                   <StatusBadge value={w.status} />
                 </td>
-                <td className="mono">{w.address}</td>
+                <td className="mono">{w.pendingDeployment ? <StatusBadge value="pending" /> : w.address}</td>
               </tr>
             ))}
             {subWallets?.length === 0 && (

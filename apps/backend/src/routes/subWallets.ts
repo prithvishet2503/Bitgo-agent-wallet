@@ -9,7 +9,7 @@ export const subWalletsRouter = Router();
 subWalletsRouter.post(
   '/',
   asyncHandler(async (req, res) => {
-    const input = CreateAgentSubWalletInputSchema.parse({ ...req.body, masterAccountId: req.user!.masterAccountId });
+    const input = CreateAgentSubWalletInputSchema.parse({ ...req.body, enterpriseId: req.enterpriseId! });
     const subWallet = subWalletService.createSubWallet(input, req.user!);
     res.status(201).json(subWallet);
   }),
@@ -18,7 +18,7 @@ subWalletsRouter.post(
 subWalletsRouter.get(
   '/',
   asyncHandler(async (req, res) => {
-    res.json(subWalletService.listSubWallets(req.user!.masterAccountId));
+    res.json(subWalletService.listSubWallets(req.enterpriseId!));
   }),
 );
 

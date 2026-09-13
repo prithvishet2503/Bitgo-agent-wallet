@@ -6,13 +6,16 @@ import { asyncHandler } from '../middleware/errorHandler.js';
 export const transactionsRouter = Router();
 
 /** Section 6.3-6.5 - submit an agent-initiated transaction; runs the full
- * simulate -> screen -> policy -> autonomy-mode pipeline synchronously and returns
- * the resulting status (this is the CLI/SDK `send` operation, Section 6.7). */
+ * simulate -> screen -> policy -> autonomy-mode pipeline inline in the request
+ * (screening now includes a live GoPlus Security lookup, so this awaits a
+ * real network call) and returns the resulting status - this is the CLI/SDK
+ * `send` operation (Section 6.7). Only the actual chain broadcast is deferred
+ * to the SendQueue. */
 transactionsRouter.post(
   '/',
   asyncHandler(async (req, res) => {
     const input = TransactionRequestInputSchema.parse(req.body);
-    const record = transactionService.submitTransaction(input, req.user!);
+    const record = await transactionService.submitTransaction(input, req.user!);
     res.status(201).json(record);
   }),
 );

@@ -12,7 +12,7 @@ incomingRouter.post(
   '/',
   asyncHandler(async (req, res) => {
     const input = SimulateIncomingTransactionInputSchema.parse(req.body);
-    const incoming = incomingScreeningService.receive(input, req.user!);
+    const incoming = await incomingScreeningService.receive(input, req.user!);
     res.status(201).json(incoming);
   }),
 );

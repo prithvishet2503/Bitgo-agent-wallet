@@ -287,9 +287,11 @@ create sub-wallets, submit transactions, and check status/balance directly.
    within ~1.5s as the SendQueue worker picks it up.
 5. Submit a transaction over the cap → escalates to **Approvals** with the
    specific policy violation shown; approve or deny it there.
-6. Try sending to `0xsanctioned0001` (or a real address from the live OFAC
-   feed - check `GET /api/v1/screening/status` for how many are loaded) →
-   hard-blocked by screening regardless of autonomy mode.
+6. Try sending to `0xsanctioned0001`, a real address from the live OFAC feed
+   (check `GET /api/v1/screening/status`), or a real known-bad address like
+   the Ronin bridge exploiter (`0x098B716B8Aaf21512996dC57EB0615e2383E2f96`,
+   flagged live by GoPlus) → hard-blocked by screening regardless of autonomy
+   mode.
 7. Record an incoming transaction from `0xsanctioned0001` on the sub-wallet
    detail page → it's quarantined; release it from **Incoming Quarantine**.
 8. Check **Audit Log** - every step above is there, immutably, including the
@@ -313,8 +315,13 @@ self-reported success) - see the sections above for how each was checked:
 - **Persistence** - SQLite by default (`store/db.ts` / `store/sqliteMap.ts`);
   survives a real process restart, including which Sepolia addresses have
   already been deployed.
-- **Sanctions screening** - the real, free, public OFAC SDN crypto-address
-  feed (`screeningService.ts`), refreshed every 6h, not a fabricated list.
+- **Sanctions + malicious-contract/mixer screening** - the real, free, public
+  OFAC SDN crypto-address feed (bulk, refreshed every 6h) *and* GoPlus
+  Security's free `address_security` API (live per-address lookup, aggregating
+  real security-firm data - SlowMist, BlockSec) - `screeningService.ts`.
+  Verified against a real-world case: the Ronin bridge exploiter's address
+  correctly comes back flagged (`stealing_attack`/`sanctioned`) and a real
+  transaction to it is hard-blocked; a clean address (Vitalik's) passes.
 - **Economic value transfer** - `execute()` calls move a real (deliberately
   tiny) amount of wei derived from `valueUsd`, and newly deployed sub-wallets
   are really funded to be able to do so.
@@ -326,10 +333,13 @@ Still mocked, and why:
   separate hardware or in separate trust domains. That's a deployment-topology
   gap, not a cryptographic one (see "Custody" above) - the algorithm's "full
   key never assembled" guarantee holds regardless of where each party runs.
-- **Malicious-contract / mixer-linkage detection** - the free OFAC feed only
-  covers sanctioned addresses; a paid vendor (Blockaid/Chainalysis - PRD
-  Section 11 open question) would add these. Small curated demo sets remain
-  for `KNOWN_MALICIOUS_CONTRACT` / `MIXER_LINKED`.
+- **Full-coverage threat intelligence** - GoPlus's free tier covers a lot
+  (see above) but a paid vendor (Blockaid/Chainalysis - PRD Section 11 open
+  question) would add deeper transaction-simulation-based drainer/scam
+  detection GoPlus's address-reputation model doesn't attempt. GoPlus lookups
+  also fail open on a vendor outage/timeout (3s) - documented in
+  `screeningService.ts` as a real tradeoff, mitigated by the OFAC feed and
+  curated demo sets still applying regardless.
 - **Notifications** - Slack/mobile-push delivery are `console.log` lines
   (`apps/backend/src/notifications/channels.ts`).
 - **Price oracle** - `CHAIN_USD_TO_ETH_RATE` is a fixed, fake constant, not a

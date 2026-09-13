@@ -22,11 +22,23 @@ the patterns used in BitGo's real microservices (`wallet-platform` and
 packages/shared      Domain types + zod schemas shared by every app (Section 6 data model)
 packages/sdk         TypeScript SDK - thin, fully-typed client over the REST API
 packages/sdk-python  Python SDK - mirrors the TS client (Section 6.7: "at minimum TypeScript/Python")
+packages/contracts   Prototype/demo smart contracts (Hardhat), deployed live to Sepolia testnet
 apps/backend         Express API + all governance business logic (in-memory store)
 apps/frontend        React admin console (Vite) - the institutional/compliance UI
 apps/cli             CLI (Section 6.7: authenticate, create-agent-wallet, send, get-balance, get-status, revoke, ...)
 apps/mcp-server      MCP server (Section 6.7) - lets agent frameworks call the wallet directly
 ```
+
+### On-chain contracts (Sepolia)
+
+`packages/contracts` has a minimal `AgentSubWalletFactory` + `AgentSubWallet`
+pair (prototype/demo, not audited - see that package's README) deployed live to
+Ethereum Sepolia: factory at
+[`0x97FCa4F8B07C7645552925860673943C086C6189`](https://sepolia.etherscan.io/address/0x97FCa4F8B07C7645552925860673943C086C6189),
+verified end-to-end (CREATE2 address prediction + `execute()`) via
+`npm run smoke-test:sepolia`. The backend's `subWalletService`/`sendQueueWorker`
+still mock deployment by default; wiring them to call this factory for real is a
+separate, optional step.
 
 The SDK, CLI, MCP server, and frontend are all thin clients of the same backend
 REST API, so there is exactly one implementation of the governance logic

@@ -61,14 +61,25 @@ Submitting a transaction to a non-address (e.g. a demo placeholder like
 clear error, rather than crashing. Use a real hex address to see a transaction
 reach `executed` in real mode.
 
-**Note on value**: there is no price oracle here - `CHAIN_USD_TO_ETH_RATE`
-(default `0.000001`) is a fake, deliberately tiny conversion used only so a
-`valueUsd` ledger figure turns into a real-but-economically-negligible amount
-of wei that's actually, genuinely transferred on-chain, without requiring
-testnet ETH in amounts that would be annoying to keep re-funding. Each newly
-deployed `AgentSubWallet` is funded with `CHAIN_SUB_WALLET_FUNDING_ETH`
-(default `0.0003` ETH) so it has a real balance to draw from, and the backend
-never sends itself below `CHAIN_MIN_TREASURY_RESERVE_ETH` doing so.
+**Note on value**: the ETH/USD exchange rate is now real -
+[Chainlink Price Feeds](https://docs.chain.link/data-feeds/price-feeds/addresses),
+the standard decentralized on-chain price oracle for EVM chains, read live via
+`services/priceOracle.ts` (a plain contract call through the same RPC provider
+`chainExecutor.ts` already holds - no API key, no signup). What's still a
+deliberate demo choice is `CHAIN_VALUE_SCALE_FACTOR` (default `0.0005`): it
+scales the *amount* of that real rate actually moved on-chain down to a
+testnet-safe size, so a `valueUsd` figure turns into a real-but-tiny wei
+amount without requiring testnet ETH in amounts that would be annoying to
+keep re-funding. Each newly deployed `AgentSubWallet` is funded with
+`CHAIN_SUB_WALLET_FUNDING_ETH` (default `0.0003` ETH) so it has a real balance
+to draw from, and the backend never sends itself below
+`CHAIN_MIN_TREASURY_RESERVE_ETH` doing so.
+
+Verified: a $100 transaction at a live-fetched price of $2,481.04/ETH computed
+to exactly 20,152,844,384,953 wei (0.0000201528... ETH) - confirmed to be
+exactly the amount the destination address's on-chain balance increased by.
+`GET /api/v1/chain/status` reports the live price, its source feed, treasury
+balance, and custody scheme on demand (not cached).
 
 ### Custody: real threshold-ECDSA MPC via BitGo's own DKLS library
 
@@ -323,8 +334,11 @@ self-reported success) - see the sections above for how each was checked:
   correctly comes back flagged (`stealing_attack`/`sanctioned`) and a real
   transaction to it is hard-blocked; a clean address (Vitalik's) passes.
 - **Economic value transfer** - `execute()` calls move a real (deliberately
-  tiny) amount of wei derived from `valueUsd`, and newly deployed sub-wallets
-  are really funded to be able to do so.
+  scaled-down) amount of wei derived from `valueUsd` and a real, live Chainlink
+  price (see "Note on value" above), and newly deployed sub-wallets are really
+  funded to be able to do so.
+- **Price oracle** - Chainlink Price Feeds (`priceOracle.ts`), read live
+  on-chain, not a fixed constant - see "Note on value" above.
 
 Still mocked, and why:
 
@@ -342,8 +356,6 @@ Still mocked, and why:
   curated demo sets still applying regardless.
 - **Notifications** - Slack/mobile-push delivery are `console.log` lines
   (`apps/backend/src/notifications/channels.ts`).
-- **Price oracle** - `CHAIN_USD_TO_ETH_RATE` is a fixed, fake constant, not a
-  real feed - see "Note on value" above.
 - **RBAC depth** - one role per user (`packages/shared/src/types/permissions.ts`
   maps role → permission strings) rather than BitGo's full per-enterprise
   Role/Permission/Resource join-table system.

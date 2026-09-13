@@ -1,6 +1,7 @@
 import { ethers } from 'ethers';
 import { randomUUID } from 'node:crypto';
 import { MpcKeySource, ShamirKeySource, StaticKeySource, type KeySource } from './keyCustody.js';
+import * as priceOracle from './priceOracle.js';
 
 /**
  * Where actual signing and broadcasting happen.
@@ -41,6 +42,14 @@ export interface ExecuteTransactionResult {
   valueWei: string;
 }
 
+export interface ChainExecutorStatus {
+  signerAddress?: string;
+  custody?: string;
+  treasuryBalanceEth?: string;
+  ethUsdPrice?: number;
+  priceOracle?: priceOracle.PriceOracleStatus;
+}
+
 export interface ChainExecutor {
   readonly mode: 'mock' | 'real';
   /** Deploys (mock) or actually deploys on-chain (real) the smart-contract
@@ -61,6 +70,9 @@ export interface ChainExecutor {
     valueUsd: number;
     transactionId: string;
   }): Promise<ExecuteTransactionResult>;
+  /** Live, on-demand status (treasury balance, current price) - not cached
+   * request state, a fresh check every call. Used by GET /api/v1/chain/status. */
+  getStatus(): Promise<ChainExecutorStatus>;
 }
 
 export class MockChainExecutor implements ChainExecutor {
@@ -77,6 +89,10 @@ export class MockChainExecutor implements ChainExecutor {
   async executeTransaction(): Promise<ExecuteTransactionResult> {
     return { txHash: `0xmock_${randomUUID().replace(/-/g, '')}`, valueWei: '0' };
   }
+
+  async getStatus(): Promise<ChainExecutorStatus> {
+    return {};
+  }
 }
 
 const FACTORY_ABI = [
@@ -86,14 +102,17 @@ const FACTORY_ABI = [
 
 const AGENT_SUB_WALLET_ABI = ['function execute(address to, uint256 value, bytes data) returns (bytes)'];
 
+/** Well-known, published Chainlink ETH/USD feed address - defaults to the
+ * Sepolia one (matching our default RPC), overridable for other networks. */
+const CHAINLINK_ETH_USD_FEED = process.env.CHAINLINK_ETH_USD_FEED_ADDRESS ?? '0x694AA1769357215DE4FAC081bf1f309aDC325306';
 /**
- * "Real" USD->ETH conversion is intentionally fake (there is no price oracle
- * here) - it exists only to turn a `valueUsd` ledger figure into a genuinely
- * small, genuinely real wei amount that actually moves on-chain, without
- * requiring an economically meaningful amount of testnet ETH. Default: $1 =
- * 0.000001 ETH, i.e. a $1,000 transaction moves 0.001 ETH.
+ * The ETH/USD exchange rate itself is now real (see priceOracle.ts). This
+ * factor scales the *amount* of that real value actually moved on-chain down
+ * to a testnet-safe size - a deliberate demo-safety choice, not a fake price.
+ * Default 0.0005: a $1,000 transaction at ~$2,500/ETH moves the real
+ * proportional amount (0.4 ETH) scaled down to 0.0002 ETH.
  */
-const USD_TO_ETH_RATE = Number(process.env.CHAIN_USD_TO_ETH_RATE ?? '0.000001');
+const VALUE_SCALE_FACTOR = Number(process.env.CHAIN_VALUE_SCALE_FACTOR ?? '0.0005');
 /** How much ETH to fund each newly deployed AgentSubWallet with, so it has a
  * real balance to actually transfer from later. */
 const SUB_WALLET_FUNDING_ETH = Number(process.env.CHAIN_SUB_WALLET_FUNDING_ETH ?? '0.0003');
@@ -104,9 +123,11 @@ const SUB_WALLET_FUNDING_ETH = Number(process.env.CHAIN_SUB_WALLET_FUNDING_ETH ?
  * wallet's ability to pay gas at all. */
 const MIN_TREASURY_RESERVE_ETH = Number(process.env.CHAIN_MIN_TREASURY_RESERVE_ETH ?? '0.005');
 
-function usdToWei(valueUsd: number): bigint {
-  const eth = Math.max(0, valueUsd) * USD_TO_ETH_RATE;
-  return ethers.parseEther(eth.toFixed(18));
+async function usdToWei(valueUsd: number, provider: ethers.Provider): Promise<bigint> {
+  const ethUsdPrice = await priceOracle.getEthUsdPrice(provider, CHAINLINK_ETH_USD_FEED);
+  const realEth = Math.max(0, valueUsd) / ethUsdPrice;
+  const scaledEth = realEth * VALUE_SCALE_FACTOR;
+  return ethers.parseEther(scaledEth.toFixed(18));
 }
 
 export class RealChainExecutor implements ChainExecutor {
@@ -200,7 +221,7 @@ export class RealChainExecutor implements ChainExecutor {
     if (!ethers.isAddress(to)) {
       throw new Error(`"${to}" is not a valid on-chain address - real chain mode requires a real destination address`);
     }
-    const valueWei = usdToWei(valueUsd);
+    const valueWei = await usdToWei(valueUsd, this.provider);
     return this.serialize(async () => {
       const wallet = await this.keySource.getWallet(this.provider);
       const subWallet = new ethers.Contract(subWalletAddress, AGENT_SUB_WALLET_ABI, wallet);
@@ -208,6 +229,20 @@ export class RealChainExecutor implements ChainExecutor {
       const receipt = await tx.wait();
       return { txHash: receipt.hash, valueWei: valueWei.toString() };
     });
+  }
+
+  async getStatus(): Promise<ChainExecutorStatus> {
+    const [balance, ethUsdPrice] = await Promise.all([
+      this.provider.getBalance(this.keySource.signerAddress),
+      priceOracle.getEthUsdPrice(this.provider, CHAINLINK_ETH_USD_FEED).catch(() => undefined),
+    ]);
+    return {
+      signerAddress: this.keySource.signerAddress,
+      custody: this.keySource.description,
+      treasuryBalanceEth: ethers.formatEther(balance),
+      ethUsdPrice,
+      priceOracle: priceOracle.getPriceOracleStatus(),
+    };
   }
 }
 
@@ -252,7 +287,8 @@ async function buildChainExecutor(): Promise<ChainExecutor> {
       console.log(`[chainExecutor] signing/broadcasting as ${executor.signerAddress} via ${rpcUrl}`);
       // eslint-disable-next-line no-console
       console.log(
-        `[chainExecutor] AgentSubWalletFactory: ${factoryAddress} | funding new wallets with ${SUB_WALLET_FUNDING_ETH} ETH | $1 = ${USD_TO_ETH_RATE} ETH`,
+        `[chainExecutor] AgentSubWalletFactory: ${factoryAddress} | funding new wallets with ${SUB_WALLET_FUNDING_ETH} ETH | ` +
+          `ETH/USD via Chainlink (${CHAINLINK_ETH_USD_FEED}), scaled ${VALUE_SCALE_FACTOR}x for testnet safety`,
       );
       return executor;
     }

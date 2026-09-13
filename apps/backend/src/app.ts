@@ -10,6 +10,7 @@ import { approvalsRouter } from './routes/approvals.js';
 import { auditLogRouter } from './routes/auditLog.js';
 import { incomingRouter } from './routes/incoming.js';
 import { screeningRouter } from './routes/screening.js';
+import { chainRouter } from './routes/chain.js';
 import { authMiddleware } from './middleware/auth.js';
 import { resolveEnterprise } from './middleware/enterprise.js';
 import { errorHandler } from './middleware/errorHandler.js';
@@ -34,6 +35,7 @@ export function createApp(): Express {
   app.use('/api/v1', authMiddleware);
   app.use('/api/v1/enterprises', enterprisesRouter);
   app.use('/api/v1/screening', screeningRouter);
+  app.use('/api/v1/chain', chainRouter);
 
   // ...and everything below also resolves which Enterprise the request acts on
   // (Section: Organization -> Enterprise hierarchy; X-Enterprise-Id header).

@@ -8,10 +8,12 @@
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
     "test": "tsx --test src/**/*.test.ts",
-    "split-key": "tsx scripts/splitKey.ts"
+    "split-key": "tsx scripts/splitKey.ts",
+    "generate-mpc-keys": "tsx scripts/generateMpcKeys.ts"
   },
   "dependencies": {
     "@bitgo-agent-wallet/shared": "0.1.0",
+    "@bitgo/sdk-lib-mpc": "^10.20.0",
     "better-sqlite3": "^11.5.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",

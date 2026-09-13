@@ -1,6 +1,6 @@
 import { ethers } from 'ethers';
 import { randomUUID } from 'node:crypto';
-import { ShamirKeySource, StaticKeySource, type KeySource } from './keyCustody.js';
+import { MpcKeySource, ShamirKeySource, StaticKeySource, type KeySource } from './keyCustody.js';
 
 /**
  * Where actual signing and broadcasting happen.
@@ -22,10 +22,12 @@ import { ShamirKeySource, StaticKeySource, type KeySource } from './keyCustody.j
  * - `RealChainExecutor` - real ethers.js calls against the AgentSubWalletFactory
  *   / AgentSubWallet contracts deployed to Sepolia (packages/contracts).
  *
- * Real mode activates when CHAIN_RPC_URL, AGENT_SUB_WALLET_FACTORY_ADDRESS, and
- * either CHAIN_SIGNER_PRIVATE_KEY or CHAIN_SIGNER_KEY_SHARES are set (see
- * .env.example) - otherwise the app falls back to the mock, so it still runs
- * with zero setup.
+ * Real mode activates when CHAIN_RPC_URL, AGENT_SUB_WALLET_FACTORY_ADDRESS,
+ * and a signing key are set (see .env.example) - otherwise the app falls back
+ * to the mock, so it still runs with zero setup. Three signing-key options,
+ * see keyCustody.ts: CHAIN_MPC_KEY_SHARE_A/_B (real MPC, preferred),
+ * CHAIN_SIGNER_KEY_SHARES (Shamir's Secret Sharing), or
+ * CHAIN_SIGNER_PRIVATE_KEY (single key).
  */
 
 export interface DeploySubWalletResult {
@@ -149,11 +151,12 @@ export class RealChainExecutor implements ChainExecutor {
     const salt = ethers.id(subWalletId);
     return this.serialize(async () => {
       const wallet = await this.keySource.getWallet(this.provider);
+      const ownerAddress = this.keySource.signerAddress;
       const factory = new ethers.Contract(this.factoryAddress, FACTORY_ABI, wallet);
 
-      const tx = await factory.deployWallet(wallet.address, agentName, salt);
+      const tx = await factory.deployWallet(ownerAddress, agentName, salt);
       const receipt = await tx.wait();
-      const address: string = await factory.computeAddress(wallet.address, agentName, salt);
+      const address: string = await factory.computeAddress(ownerAddress, agentName, salt);
 
       let fundingTxHash: string | null = null;
       const fundingWei = ethers.parseEther(String(SUB_WALLET_FUNDING_ETH));
@@ -209,17 +212,28 @@ export class RealChainExecutor implements ChainExecutor {
 }
 
 async function resolveKeySource(): Promise<KeySource | null> {
-  const singleKey = process.env.CHAIN_SIGNER_PRIVATE_KEY;
-  if (singleKey) return new StaticKeySource(singleKey);
+  const expectedAddress = process.env.CHAIN_SIGNER_EXPECTED_ADDRESS;
 
+  // Preferred: real MPC (never assembles the full key at all).
+  const mpcShareA = process.env.CHAIN_MPC_KEY_SHARE_A;
+  const mpcShareB = process.env.CHAIN_MPC_KEY_SHARE_B;
+  if (mpcShareA && mpcShareB) {
+    return MpcKeySource.create(Buffer.from(mpcShareA, 'base64'), Buffer.from(mpcShareB, 'base64'), expectedAddress);
+  }
+
+  // Next best: Shamir's Secret Sharing (reconstructs transiently to sign).
   const sharesRaw = process.env.CHAIN_SIGNER_KEY_SHARES;
   if (sharesRaw) {
     const shareHexes = sharesRaw
       .split(',')
       .map((s) => s.trim())
       .filter(Boolean);
-    return ShamirKeySource.create(shareHexes, process.env.CHAIN_SIGNER_EXPECTED_ADDRESS);
+    return ShamirKeySource.create(shareHexes, expectedAddress);
   }
+
+  // Simplest: one raw key.
+  const singleKey = process.env.CHAIN_SIGNER_PRIVATE_KEY;
+  if (singleKey) return new StaticKeySource(singleKey);
 
   return null;
 }
@@ -246,7 +260,8 @@ async function buildChainExecutor(): Promise<ChainExecutor> {
 
   // eslint-disable-next-line no-console
   console.log(
-    '[chainExecutor] MOCK mode - set CHAIN_RPC_URL, AGENT_SUB_WALLET_FACTORY_ADDRESS, and either CHAIN_SIGNER_PRIVATE_KEY or CHAIN_SIGNER_KEY_SHARES to go live',
+    '[chainExecutor] MOCK mode - set CHAIN_RPC_URL, AGENT_SUB_WALLET_FACTORY_ADDRESS, and a signing key ' +
+      '(CHAIN_MPC_KEY_SHARE_A/_B for real MPC, CHAIN_SIGNER_KEY_SHARES for Shamir, or CHAIN_SIGNER_PRIVATE_KEY) to go live',
   );
   return new MockChainExecutor();
 }

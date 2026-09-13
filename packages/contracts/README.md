@@ -38,9 +38,11 @@ key works on both.
 
 ## After deploying
 
-`deployments/sepolia.json` has the factory address. Wiring the backend
-(`apps/backend`) to actually call this factory instead of mocking sub-wallet
-deployment is a separate, optional step - see the root README.
+`deployments/sepolia.json` has the factory address. `apps/backend` is wired to
+call this factory for real when configured (`apps/backend/.env` -
+`CHAIN_RPC_URL` / `CHAIN_SIGNER_PRIVATE_KEY` / `AGENT_SUB_WALLET_FACTORY_ADDRESS`)
+- see `apps/backend/src/services/chainExecutor.ts` and the root README's
+"On-chain contracts" section. Without that config it falls back to a mock.
 
 ```bash
 npm run smoke-test:sepolia        # predicts an address, deploys through the

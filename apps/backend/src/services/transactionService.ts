@@ -19,18 +19,22 @@ import * as gasSponsorshipService from './gasSponsorshipService.js';
 import * as approvalService from './approvalService.js';
 import * as sendQueueService from './sendQueueService.js';
 import * as auditService from './auditService.js';
-import type { Signer } from './signer.js';
+import type { ChainExecutor } from './chainExecutor.js';
 
 /**
  * Orchestrates the full agent-transaction lifecycle described across Sections
  * 6.2-6.5 and 6.10: pre-execution checks -> policy evaluation -> autonomy-mode
  * routing -> (auto-proceed | human approval) -> gas-sponsorship decision ->
- * SendQueue. Mirrors wallet-platform's `send.ts`: everything up through deciding
- * *that* a transaction should go out happens inline in the request; actually
- * signing and broadcasting happens later, off a `SendQueueEntry`
- * (`completeBroadcast`, called by scheduler/sendQueueWorker.ts) - never
- * synchronously inside the HTTP request. Every step is audit-logged (Section 6.8)
- * as it happens.
+ * SendQueue. Mirrors wallet-platform's `send.ts` in one respect only: everything
+ * up through deciding *that* a transaction should go out happens inline in the
+ * request, and actual signing/broadcasting happens later, off a
+ * `SendQueueEntry` (`completeBroadcast`, called by
+ * scheduler/sendQueueWorker.ts) - never synchronously inside the HTTP request.
+ * Unlike wallet-platform, there is no second service on the other end of that
+ * queue: the same backend process that enqueues an entry also signs and
+ * broadcasts it (see chainExecutor.ts) - the queue exists only to keep chain
+ * latency off the request path, not to hand work to another service. Every
+ * step is audit-logged (Section 6.8) as it happens.
  */
 
 function newRecordShell(request: TransactionRequestInput, subWallet: { id: string; enterpriseId: string }): TransactionRecord {
@@ -88,6 +92,29 @@ export function submitTransaction(request: TransactionRequestInput, actingUser: 
       actorUserId: null,
       actorType: 'system',
       summary: 'Transaction denied: sub-wallet is suspended',
+      metadata: { transactionId: record.id },
+    });
+    return record;
+  }
+
+  // A sub-wallet still waiting on its on-chain deployment (SendQueue
+  // "wallet_deployment" entry) has no address yet - nothing to execute() from.
+  // In real chain mode this can take a real block time to resolve, so this is
+  // a genuine race, not just a formality.
+  if (subWallet.pendingDeployment || !subWallet.address) {
+    record.policyViolations = [
+      { code: 'SUB_WALLET_NOT_DEPLOYED', message: `Sub-wallet ${subWallet.agentName} is still deploying on-chain; try again shortly` },
+    ];
+    record.status = 'policy_denied';
+    record.decidedAt = nowIso();
+    transactionDao.createOrUpdate(record);
+    auditService.record({
+      enterpriseId: subWallet.enterpriseId,
+      subWalletId: subWallet.id,
+      eventType: 'TRANSACTION_POLICY_DENIED',
+      actorUserId: null,
+      actorType: 'system',
+      summary: 'Transaction denied: sub-wallet has not finished on-chain deployment',
       metadata: { transactionId: record.id },
     });
     return record;
@@ -232,12 +259,29 @@ function queueForBroadcast(
 
 /** Called by the SendQueue worker (scheduler/sendQueueWorker.ts) once a
  * `transaction_broadcast` entry is dequeued - the only place a transaction
- * actually flips to `executed`. Idempotent against re-processing. */
-export async function completeBroadcast(id: string, signerImpl: Signer): Promise<void> {
+ * actually flips to `executed`. Idempotent against re-processing.
+ *
+ * In real chain mode (chainExecutor.ts) this is a real, signed, broadcast
+ * transaction calling the deployed AgentSubWallet's `execute()` - with zero
+ * value and empty calldata, so it proves the sign-and-broadcast path end to
+ * end without moving real funds (`valueUsd` stays a backend-tracked ledger
+ * figure, not a wei amount actually transferred on-chain). */
+export async function completeBroadcast(id: string, executor: ChainExecutor): Promise<void> {
   const record = getTransaction(id);
   if (record.status !== 'approved') return;
 
-  const { signature } = await signerImpl.sign(record.subWalletId, `transfer:${record.request.valueUsd}`);
+  const subWallet = subWalletService.getSubWallet(record.subWalletId);
+  if (!subWallet.address) {
+    // Shouldn't happen (submitTransaction already guards this), but never
+    // execute() against a wallet with no address.
+    throw new DomainError('Cannot broadcast: sub-wallet has no on-chain address yet', 'SUB_WALLET_NOT_DEPLOYED', 409);
+  }
+
+  const { txHash } = await executor.executeTransaction({
+    subWalletAddress: subWallet.address,
+    to: record.request.to,
+    transactionId: record.id,
+  });
 
   if (record.gasSponsored) {
     gasSponsorshipService.recordSponsorship(record.subWalletId, record.id, record.simulation!.estimatedFeeUsd);
@@ -262,8 +306,8 @@ export async function completeBroadcast(id: string, signerImpl: Signer): Promise
     eventType: 'TRANSACTION_EXECUTED',
     actorUserId: null,
     actorType: 'system',
-    summary: `Transaction broadcast and confirmed: $${record.request.valueUsd} to ${record.request.to}`,
-    metadata: { transactionId: record.id, signature },
+    summary: `Transaction broadcast and confirmed: $${record.request.valueUsd} to ${record.request.to} (${executor.mode} mode)`,
+    metadata: { transactionId: record.id, txHash, chainMode: executor.mode },
   });
 }
 

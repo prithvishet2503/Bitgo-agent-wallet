@@ -70,32 +70,53 @@ deployed `AgentSubWallet` is funded with `CHAIN_SUB_WALLET_FUNDING_ETH`
 (default `0.0003` ETH) so it has a real balance to draw from, and the backend
 never sends itself below `CHAIN_MIN_TREASURY_RESERVE_ETH` doing so.
 
-### Custody: Shamir's Secret Sharing, not one hot key
+### Custody: real threshold-ECDSA MPC via BitGo's own DKLS library
 
-`CHAIN_SIGNER_PRIVATE_KEY` (a single key) still works, but the recommended
-setup is `CHAIN_SIGNER_KEY_SHARES` - M-of-N custody via the
-[`shamir-secret-sharing`](https://github.com/privy-io/shamir-secret-sharing)
+Three custody options, in order of preference (`services/keyCustody.ts` picks
+whichever is configured):
+
+**1. Real MPC (`CHAIN_MPC_KEY_SHARE_A`/`_B`, recommended).** Uses
+[`@bitgo/sdk-lib-mpc`](https://www.npmjs.com/package/@bitgo/sdk-lib-mpc) -
+BitGo's own published, audited DKLS threshold-ECDSA implementation, the same
+library their production TSS wallets use for ECDSA coins. Generate a real
+2-of-2 key pair with `npm run generate-mpc-keys` (runs an actual multi-round
+DKG ceremony). `services/mpcSigner.ts` implements `DklsMpcSigner`, a real
+`ethers.AbstractSigner` - it drops into `ethers.Contract(...)` exactly like
+`ethers.Wallet` does, but every `signTransaction()` call runs a full 5-round
+Distributed Signature Generation (DSG) ceremony between two parties (each
+holding only its own key share) to produce the signature. **The complete
+private key never exists as a single value anywhere, in any process, at any
+point** - not even transiently. That's a different and stronger guarantee than
+option 2 below.
+
+Verified with three independent on-chain checks: derived an address from a
+real DKG ceremony, funded it, then deployed a real `AgentSubWallet` and
+executed a real value-moving transaction - both signed via the DSG ceremony -
+and confirmed via direct RPC (`getTransactionReceipt`) that `from` matched the
+MPC-derived address exactly and `to` matched the deployed contract, with
+`status: 1`.
+
+**2. Shamir's Secret Sharing (`CHAIN_SIGNER_KEY_SHARES`).** M-of-N custody via
+the [`shamir-secret-sharing`](https://github.com/privy-io/shamir-secret-sharing)
 library (independently audited by Cure53 and Zellic). Generate shares from an
 existing key with `npm run split-key -- <privateKeyHex> 3 2` (3 shares, 2
-required). `services/keyCustody.ts` reconstructs the key fresh for every
-signing operation rather than keeping it resident in memory for the process's
-lifetime, and verifies the reconstruction against `CHAIN_SIGNER_EXPECTED_ADDRESS`
-if set.
+required). Reconstructs the key fresh for every signing operation rather than
+keeping it resident in memory for the process's lifetime - genuinely removes
+any single point of *storage* for the complete key, but still assembles it
+transiently to sign. Verified: split a key into 3 shares, ran the backend on
+only 2, confirmed it reconstructed the identical address and successfully
+deployed + funded + executed against it on Sepolia.
 
-Verified: split the deployer key into 3 shares, configured the backend with
-only 2 of them, and confirmed it reconstructed the identical signing address
-and successfully deployed + funded + executed against it on Sepolia.
+**3. Single hot key (`CHAIN_SIGNER_PRIVATE_KEY`).** Simplest, one point of
+storage.
 
-Stated plainly so it isn't oversold: this removes any single point of
-*storage* for the complete key (N shares, ideally held by separate
-custodians/secret stores; none individually usable) and doesn't leave the full
-key sitting in memory between operations - a real improvement over one raw key
-in one `.env`. It is **not** the same guarantee as the threshold-ECDSA MPC
-BitGo actually runs in production, which never assembles the full private key
-anywhere, even momentarily, across cooperating parties. An audited
-threshold-ECDSA implementation is a much larger, security-critical undertaking
-than fits a prototype - SSS-based custody is the honestly-scoped middle ground
-between "one hot key" and "real MPC/HSM".
+All three verify against `CHAIN_SIGNER_EXPECTED_ADDRESS` if set. Options 1 and
+2 both run every party/share in the same backend process for this prototype -
+for MPC that's a deployment simplification, not a cryptographic one (moving
+Party B to a genuinely separate service later changes nothing about the
+protocol); for Shamir, running the parts of a real deployment that reconstruct
+the key on one machine is exactly the risk splitting it is meant to reduce, so
+option 1 is the more honest "real" answer to "no single point holds the key."
 
 ### Where signing and broadcasting happen - a deliberate divergence from BitGo
 
@@ -220,9 +241,10 @@ Sepolia:
 ```bash
 cd apps/backend
 cp .env.example .env
-# Option A - simplest: fill in CHAIN_SIGNER_PRIVATE_KEY with a funded Sepolia key.
-# Option B - recommended: npm run split-key -- <privateKeyHex> 3 2, then set
-#   CHAIN_SIGNER_KEY_SHARES + CHAIN_SIGNER_EXPECTED_ADDRESS from its output instead.
+# Recommended: npm run generate-mpc-keys, then set CHAIN_MPC_KEY_SHARE_A/_B +
+#   CHAIN_SIGNER_EXPECTED_ADDRESS from its output and fund that address.
+# Simpler alternatives: npm run split-key (Shamir), or just
+#   CHAIN_SIGNER_PRIVATE_KEY with a funded Sepolia key.
 # (AGENT_SUB_WALLET_FACTORY_ADDRESS already points at the deployed factory)
 npm run dev   # or: node dist/index.js after npm run build
 ```
@@ -284,8 +306,10 @@ self-reported success) - see the sections above for how each was checked:
 - **Chain deployment/execution** - real signed, broadcast, confirmed Sepolia
   transactions when `chainExecutor.ts` is configured; falls back to a
   deterministic mock with zero setup otherwise.
-- **Custody** - M-of-N Shamir's Secret Sharing (`keyCustody.ts`), not one raw
-  key; reconstructed fresh per signing operation, never persisted assembled.
+- **Custody** - real threshold-ECDSA MPC (`keyCustody.ts` / `mpcSigner.ts`,
+  via BitGo's own `@bitgo/sdk-lib-mpc`) as the preferred option - the full
+  private key never exists as a single value anywhere; Shamir's Secret
+  Sharing and a single hot key remain as simpler fallbacks.
 - **Persistence** - SQLite by default (`store/db.ts` / `store/sqliteMap.ts`);
   survives a real process restart, including which Sepolia addresses have
   already been deployed.
@@ -297,11 +321,11 @@ self-reported success) - see the sections above for how each was checked:
 
 Still mocked, and why:
 
-- **True MPC/HSM** - Shamir's Secret Sharing is a genuine step up (see
-  "Custody" above) but still reconstructs the full key transiently; real
-  threshold-ECDSA MPC never assembles it at all, and implementing that
-  correctly is a much larger, security-critical undertaking than fits a
-  prototype.
+- **HSM-backed key generation / hardware isolation** - the two MPC parties'
+  shares (and the DSG ceremony itself) run as plain in-process objects, not on
+  separate hardware or in separate trust domains. That's a deployment-topology
+  gap, not a cryptographic one (see "Custody" above) - the algorithm's "full
+  key never assembled" guarantee holds regardless of where each party runs.
 - **Malicious-contract / mixer-linkage detection** - the free OFAC feed only
   covers sanctioned addresses; a paid vendor (Blockaid/Chainalysis - PRD
   Section 11 open question) would add these. Small curated demo sets remain

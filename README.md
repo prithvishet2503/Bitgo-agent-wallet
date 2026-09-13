@@ -42,28 +42,60 @@ has two implementations of a `ChainExecutor` interface:
 - **`MockChainExecutor`** (default) - fake addresses/tx hashes, zero network
   calls, so the app runs standalone with no external dependency.
 - **`RealChainExecutor`** - real `ethers.js` calls against the deployed
-  contracts. Activates automatically when `CHAIN_RPC_URL`,
-  `CHAIN_SIGNER_PRIVATE_KEY`, and `AGENT_SUB_WALLET_FACTORY_ADDRESS` are all set
-  (see `apps/backend/.env.example`). Verified working end-to-end: creating an
-  agent sub-wallet really deploys an `AgentSubWallet` via the factory on
-  Sepolia, and submitting a transaction to a real address really calls its
-  `execute()` on-chain - both signed and broadcast by the backend itself (see
-  below).
+  contracts. Activates when `CHAIN_RPC_URL`, `AGENT_SUB_WALLET_FACTORY_ADDRESS`,
+  and a signing key (`CHAIN_SIGNER_PRIVATE_KEY` or `CHAIN_SIGNER_KEY_SHARES` -
+  see "Custody" below) are set (see `apps/backend/.env.example`). Verified
+  working end-to-end, with independently-checked on-chain proof, not just
+  self-reported success:
+  - Creating an agent sub-wallet really deploys an `AgentSubWallet` via the
+    factory on Sepolia, then really funds it with real ETH.
+  - Submitting a transaction to a real address really calls its `execute()`
+    on-chain and really moves real ETH - confirmed by reading the
+    destination's and the sub-wallet's balances before and after (a $200
+    transaction at the default demo rate moved exactly 0.0002 ETH; the
+    sub-wallet's on-chain balance dropped by exactly that amount).
 
 Submitting a transaction to a non-address (e.g. a demo placeholder like
 `0xdest1`) in real mode fails the broadcast cleanly - the transaction stays
 `approved` (queued, retryable) and the SendQueue entry is marked failed with a
-clear error, rather than crashing. Use a real hex address (your own deployer
-address works as a harmless self-call) to see a transaction reach `executed`
-in real mode.
+clear error, rather than crashing. Use a real hex address to see a transaction
+reach `executed` in real mode.
 
-**Note on value**: `execute()` calls in real mode always send zero ETH with
-empty calldata - a real, gas-paying, on-chain transaction that proves the
-sign-and-broadcast path end to end, but `valueUsd` stays a backend-tracked
-ledger figure rather than an amount actually transferred on-chain. Wiring real
-economic transfers (funding each deployed `AgentSubWallet` and encoding a real
-value/calldata per transaction) is a bigger, riskier follow-up, deliberately
-out of scope here.
+**Note on value**: there is no price oracle here - `CHAIN_USD_TO_ETH_RATE`
+(default `0.000001`) is a fake, deliberately tiny conversion used only so a
+`valueUsd` ledger figure turns into a real-but-economically-negligible amount
+of wei that's actually, genuinely transferred on-chain, without requiring
+testnet ETH in amounts that would be annoying to keep re-funding. Each newly
+deployed `AgentSubWallet` is funded with `CHAIN_SUB_WALLET_FUNDING_ETH`
+(default `0.0003` ETH) so it has a real balance to draw from, and the backend
+never sends itself below `CHAIN_MIN_TREASURY_RESERVE_ETH` doing so.
+
+### Custody: Shamir's Secret Sharing, not one hot key
+
+`CHAIN_SIGNER_PRIVATE_KEY` (a single key) still works, but the recommended
+setup is `CHAIN_SIGNER_KEY_SHARES` - M-of-N custody via the
+[`shamir-secret-sharing`](https://github.com/privy-io/shamir-secret-sharing)
+library (independently audited by Cure53 and Zellic). Generate shares from an
+existing key with `npm run split-key -- <privateKeyHex> 3 2` (3 shares, 2
+required). `services/keyCustody.ts` reconstructs the key fresh for every
+signing operation rather than keeping it resident in memory for the process's
+lifetime, and verifies the reconstruction against `CHAIN_SIGNER_EXPECTED_ADDRESS`
+if set.
+
+Verified: split the deployer key into 3 shares, configured the backend with
+only 2 of them, and confirmed it reconstructed the identical signing address
+and successfully deployed + funded + executed against it on Sepolia.
+
+Stated plainly so it isn't oversold: this removes any single point of
+*storage* for the complete key (N shares, ideally held by separate
+custodians/secret stores; none individually usable) and doesn't leave the full
+key sitting in memory between operations - a real improvement over one raw key
+in one `.env`. It is **not** the same guarantee as the threshold-ECDSA MPC
+BitGo actually runs in production, which never assembles the full private key
+anywhere, even momentarily, across cooperating parties. An audited
+threshold-ECDSA implementation is a much larger, security-critical undertaking
+than fits a prototype - SSS-based custody is the honestly-scoped middle ground
+between "one hot key" and "real MPC/HSM".
 
 ### Where signing and broadcasting happen - a deliberate divergence from BitGo
 
@@ -102,15 +134,23 @@ more than one, they select which via the `X-Enterprise-Id` header (the console
 exposes this as the sidebar's Enterprise switcher; the SDK via
 `client.setEnterpriseId()`).
 
-### Data-access layer (DAO pattern)
+### Data-access layer (DAO pattern) - and real persistence
 
 Services never touch storage directly - they call a `dal/models/*.dao.ts`
 singleton (`subWalletDao`, `pactDao`, `enterpriseDao`, ...) implementing a shared
 `BaseDao` interface (`apps/backend/src/dal/base.dao.ts`), mirroring
 wallet-platform's `app/dal/interfaces/base.dao.ts` + `app/dal/models/*.dao.ts`.
-Swapping the in-memory store (`apps/backend/src/store/db.ts`) for a real database
-means rewriting that one file and the DAOs' two-line bodies - no service logic
-changes.
+
+This paid off directly: `apps/backend/src/store/db.ts` now persists to SQLite
+by default (`data/bitgo-agent-wallet.sqlite`, gitignored) via
+`store/sqliteMap.ts` - a `Map`-compatible wrapper around `better-sqlite3` - and
+**nothing else changed**. Every `dal/models/*.dao.ts` file and every service
+built on it is exactly as it was; only `db.ts` knows storage is now a real
+file instead of memory. Verified: created a sub-wallet, killed the backend
+process outright, confirmed the port was free, started a fresh process, and
+the sub-wallet (including its real on-chain address) was still there. Set
+`PERSISTENCE_MODE=memory` to opt back into wipe-on-restart (tests, throwaway
+demos).
 
 ### Smart-contract interaction: build-and-queue, never inline
 
@@ -173,19 +213,22 @@ Log in with one of the seeded demo tokens (shown on the login screen):
 `demo-admin-token`, `demo-compliance-token`, `demo-dev-token`, `demo-viewer-token`.
 Or use the **Create organization** tab to sign up a brand-new tenant from scratch.
 
-By default the backend runs in mock chain mode (no setup needed). To make it
-actually deploy/execute on Sepolia:
+By default the backend runs in mock chain mode with SQLite persistence (no
+setup needed beyond `npm install`). To make it actually deploy/execute on
+Sepolia:
 
 ```bash
 cd apps/backend
 cp .env.example .env
-# fill in CHAIN_SIGNER_PRIVATE_KEY with a funded Sepolia key
+# Option A - simplest: fill in CHAIN_SIGNER_PRIVATE_KEY with a funded Sepolia key.
+# Option B - recommended: npm run split-key -- <privateKeyHex> 3 2, then set
+#   CHAIN_SIGNER_KEY_SHARES + CHAIN_SIGNER_EXPECTED_ADDRESS from its output instead.
 # (AGENT_SUB_WALLET_FACTORY_ADDRESS already points at the deployed factory)
 npm run dev   # or: node dist/index.js after npm run build
 ```
 
-The startup log says which mode it's in: `[chainExecutor] REAL mode - ...` or
-`[chainExecutor] MOCK mode - ...`.
+The startup log says which mode it's in and which custody scheme:
+`[chainExecutor] REAL mode - custody: ...` or `[chainExecutor] MOCK mode - ...`.
 
 ### CLI
 
@@ -222,8 +265,9 @@ create sub-wallets, submit transactions, and check status/balance directly.
    within ~1.5s as the SendQueue worker picks it up.
 5. Submit a transaction over the cap → escalates to **Approvals** with the
    specific policy violation shown; approve or deny it there.
-6. Try sending to `0xsanctioned0001` → hard-blocked by screening regardless of
-   autonomy mode.
+6. Try sending to `0xsanctioned0001` (or a real address from the live OFAC
+   feed - check `GET /api/v1/screening/status` for how many are loaded) →
+   hard-blocked by screening regardless of autonomy mode.
 7. Record an incoming transaction from `0xsanctioned0001` on the sub-wallet
    detail page → it's quarantined; release it from **Incoming Quarantine**.
 8. Check **Audit Log** - every step above is there, immutably, including the
@@ -232,31 +276,44 @@ create sub-wallets, submit transactions, and check status/balance directly.
 9. From the sidebar, click **+ New enterprise** to create a second Enterprise
    under the same Organization and switch to it.
 
-## What's intentionally mocked (and what isn't, anymore)
+## What's real now, and what's still mocked
 
-- **Chain deployment/execution**: real when `chainExecutor.ts` is configured
-  (see above) - actual signed, broadcast, confirmed Sepolia transactions.
-  Falls back to a deterministic mock with zero setup otherwise.
-- **Custody**: still no real MPC/HSM - the backend's chain-signing key is a
-  single hot private key in `.env` (fine for a testnet demo; production would
-  put this behind an MPC/HSM signer instead, still called from
-  `chainExecutor.ts` and nowhere else). Sub-wallet `sessionKeyRef` fields
-  remain opaque string references, not real key material.
-- **Screening**: `screeningService.ts` uses a small in-memory watchlist instead of
-  a licensed vendor (Blockaid/Chainalysis - PRD Section 11 open question).
-- **Notifications**: Slack/mobile-push delivery are `console.log` lines
+Real, with independently-verified on-chain/on-disk proof (not just
+self-reported success) - see the sections above for how each was checked:
+
+- **Chain deployment/execution** - real signed, broadcast, confirmed Sepolia
+  transactions when `chainExecutor.ts` is configured; falls back to a
+  deterministic mock with zero setup otherwise.
+- **Custody** - M-of-N Shamir's Secret Sharing (`keyCustody.ts`), not one raw
+  key; reconstructed fresh per signing operation, never persisted assembled.
+- **Persistence** - SQLite by default (`store/db.ts` / `store/sqliteMap.ts`);
+  survives a real process restart, including which Sepolia addresses have
+  already been deployed.
+- **Sanctions screening** - the real, free, public OFAC SDN crypto-address
+  feed (`screeningService.ts`), refreshed every 6h, not a fabricated list.
+- **Economic value transfer** - `execute()` calls move a real (deliberately
+  tiny) amount of wei derived from `valueUsd`, and newly deployed sub-wallets
+  are really funded to be able to do so.
+
+Still mocked, and why:
+
+- **True MPC/HSM** - Shamir's Secret Sharing is a genuine step up (see
+  "Custody" above) but still reconstructs the full key transiently; real
+  threshold-ECDSA MPC never assembles it at all, and implementing that
+  correctly is a much larger, security-critical undertaking than fits a
+  prototype.
+- **Malicious-contract / mixer-linkage detection** - the free OFAC feed only
+  covers sanctioned addresses; a paid vendor (Blockaid/Chainalysis - PRD
+  Section 11 open question) would add these. Small curated demo sets remain
+  for `KNOWN_MALICIOUS_CONTRACT` / `MIXER_LINKED`.
+- **Notifications** - Slack/mobile-push delivery are `console.log` lines
   (`apps/backend/src/notifications/channels.ts`).
-- **Persistence**: everything lives in an in-memory store
-  (`apps/backend/src/store/db.ts`) that resets on restart - including the
-  record of what's been deployed on-chain, so restarting the backend forgets
-  which Sepolia addresses it already owns (the contracts themselves are
-  unaffected; only the backend's index of them resets).
-- **Economic value**: `execute()` calls never move real funds (see above) -
-  `valueUsd` is a ledger figure, not a wei amount.
-- **RBAC**: one role per user (`packages/shared/src/types/permissions.ts` maps
-  role → permission strings) rather than BitGo's full per-enterprise
+- **Price oracle** - `CHAIN_USD_TO_ETH_RATE` is a fixed, fake constant, not a
+  real feed - see "Note on value" above.
+- **RBAC depth** - one role per user (`packages/shared/src/types/permissions.ts`
+  maps role → permission strings) rather than BitGo's full per-enterprise
   Role/Permission/Resource join-table system.
 
-Swapping any of these for the real thing touches only the file(s) listed above -
-no other service's governance logic needs to change, by design (DAO layer +
-narrow ChainExecutor/SendQueue interfaces).
+Swapping any of the still-mocked ones for the real thing touches only the
+file(s) named above - no other service's governance logic needs to change, by
+design (DAO layer + narrow ChainExecutor/KeySource/SendQueue interfaces).

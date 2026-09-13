@@ -110,7 +110,7 @@ export async function completeDeployment(id: string, executor: ChainExecutor): P
   const subWallet = getSubWallet(id);
   if (!subWallet.pendingDeployment) return;
 
-  const { address, txHash } = await executor.deploySubWallet({ subWalletId: id, agentName: subWallet.agentName });
+  const { address, txHash, fundingTxHash } = await executor.deploySubWallet({ subWalletId: id, agentName: subWallet.agentName });
   subWallet.address = address;
   subWallet.pendingDeployment = false;
   subWallet.walletFullyCreated = true;
@@ -122,8 +122,10 @@ export async function completeDeployment(id: string, executor: ChainExecutor): P
     eventType: 'SUB_WALLET_DEPLOYED',
     actorUserId: null,
     actorType: 'system',
-    summary: `Agent sub-wallet deployed on-chain at ${subWallet.address} (${executor.mode} mode)`,
-    metadata: { txHash, chainMode: executor.mode },
+    summary: fundingTxHash
+      ? `Agent sub-wallet deployed on-chain at ${subWallet.address} and funded (${executor.mode} mode)`
+      : `Agent sub-wallet deployed on-chain at ${subWallet.address} (${executor.mode} mode)`,
+    metadata: { txHash, fundingTxHash, chainMode: executor.mode },
   });
 }
 

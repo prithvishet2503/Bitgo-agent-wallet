@@ -62,7 +62,7 @@ function assertAccessible(enterpriseId: string, actingUser: User): void {
   }
 }
 
-export function submitTransaction(request: TransactionRequestInput, actingUser: User): TransactionRecord {
+export async function submitTransaction(request: TransactionRequestInput, actingUser: User): Promise<TransactionRecord> {
   const subWallet = subWalletService.getSubWallet(request.subWalletId);
   assertAccessible(subWallet.enterpriseId, actingUser);
 
@@ -141,7 +141,7 @@ export function submitTransaction(request: TransactionRequestInput, actingUser: 
 
   // Section 6.3 - threat/sanctions screening. "Failed screening = hard block, not
   // just a flag" - this overrides autonomy mode entirely, in both directions.
-  const screening = screeningService.screenOutgoing(request.to, request.contractAddress);
+  const screening = await screeningService.screenOutgoing(request.to, request.contractAddress, request.network);
   record.screening = screening;
   if (screening.verdict === 'flagged') {
     record.status = 'screening_blocked';

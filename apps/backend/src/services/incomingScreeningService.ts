@@ -25,13 +25,13 @@ import * as auditService from './auditService.js';
  * screening call itself still runs synchronously "within seconds of confirmation,
  * not batched" as the PRD requires.
  */
-export function receive(input: SimulateIncomingTransactionInput, actingUser: User): IncomingTransaction {
+export async function receive(input: SimulateIncomingTransactionInput, actingUser: User): Promise<IncomingTransaction> {
   const subWallet = subWalletService.getSubWallet(input.subWalletId);
   if (!actingUser.accessibleEnterpriseIds.includes(subWallet.enterpriseId)) {
     throw new ForbiddenError('Cannot record an incoming transaction outside an enterprise you have access to');
   }
 
-  const screening = screeningService.screen({ address: input.fromAddress });
+  const screening = await screeningService.screen({ address: input.fromAddress, network: input.network });
   const id = `incoming_${randomUUID()}`;
   const confirmedAt = nowIso();
 

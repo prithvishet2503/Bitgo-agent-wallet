@@ -277,9 +277,10 @@ export async function completeBroadcast(id: string, executor: ChainExecutor): Pr
     throw new DomainError('Cannot broadcast: sub-wallet has no on-chain address yet', 'SUB_WALLET_NOT_DEPLOYED', 409);
   }
 
-  const { txHash } = await executor.executeTransaction({
+  const { txHash, valueWei } = await executor.executeTransaction({
     subWalletAddress: subWallet.address,
     to: record.request.to,
+    valueUsd: record.request.valueUsd,
     transactionId: record.id,
   });
 
@@ -307,7 +308,7 @@ export async function completeBroadcast(id: string, executor: ChainExecutor): Pr
     actorUserId: null,
     actorType: 'system',
     summary: `Transaction broadcast and confirmed: $${record.request.valueUsd} to ${record.request.to} (${executor.mode} mode)`,
-    metadata: { transactionId: record.id, txHash, chainMode: executor.mode },
+    metadata: { transactionId: record.id, txHash, valueWei, chainMode: executor.mode },
   });
 }
 

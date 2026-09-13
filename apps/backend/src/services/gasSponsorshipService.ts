@@ -17,6 +17,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  */
 function sponsoredSpendSince(subWalletId: string, sinceMs: number): number {
   return db.gasSponsorshipLedger
+    .all()
     .filter((e) => e.subWalletId === subWalletId)
     .filter((e) => Date.parse(e.timestamp) >= sinceMs)
     .reduce((sum, e) => sum + e.amountUsd, 0);

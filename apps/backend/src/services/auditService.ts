@@ -45,6 +45,7 @@ export function query(q: AuditLogQuery): AuditLogEntry[] {
   const fromMs = q.from ? Date.parse(q.from) : -Infinity;
   const toMs = q.to ? Date.parse(q.to) : Infinity;
   return db.auditLog
+    .all()
     .filter((e) => e.enterpriseId === q.enterpriseId)
     .filter((e) => !q.subWalletId || e.subWalletId === q.subWalletId)
     .filter((e) => !q.eventType || e.eventType === q.eventType)
@@ -59,7 +60,7 @@ export function query(q: AuditLogQuery): AuditLogEntry[] {
 /** Section 6.8 - exportable log (CSV / API). SIEM integration is out of scope for
  * this prototype but the shape here is what an exporter would stream. */
 export function exportCsv(enterpriseId: string): string {
-  const rows = db.auditLog.filter((e) => e.enterpriseId === enterpriseId);
+  const rows = db.auditLog.all().filter((e) => e.enterpriseId === enterpriseId);
   const header = ['id', 'timestamp', 'eventType', 'actorType', 'actorUserId', 'subWalletId', 'summary'];
   const lines = rows.map((r) =>
     [r.id, r.timestamp, r.eventType, r.actorType, r.actorUserId ?? '', r.subWalletId ?? '', JSON.stringify(r.summary)].join(','),

@@ -17,8 +17,20 @@ export interface BaseDao<T> {
   delete(id: string): boolean;
 }
 
+/** Structural shape `InMemoryDao` needs from its backing store - satisfied by
+ * both a native `Map<string, T>` (default, wiped on restart) and
+ * `store/sqliteMap.ts`'s `SqliteBackedMap<T>` (persists to disk). Whichever one
+ * `store/db.ts` constructs is the only thing that decides persistence -
+ * nothing here or in any `dal/models/*.dao.ts` file needs to know which. */
+export interface KeyedStore<T> {
+  get(id: string): T | undefined;
+  set(id: string, value: T): unknown;
+  delete(id: string): boolean;
+  values(): Iterable<T>;
+}
+
 export class InMemoryDao<T extends { id: string }> implements BaseDao<T> {
-  constructor(private readonly store: Map<string, T>) {}
+  constructor(private readonly store: KeyedStore<T>) {}
 
   get(id: string): T | undefined {
     return this.store.get(id);

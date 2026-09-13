@@ -1,0 +1,21 @@
+{
+  "name": "@bitgo-agent-wallet/contracts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "compile": "hardhat compile",
+    "deploy:sepolia": "hardhat run scripts/deploy.ts --network sepolia",
+    "deploy:baseSepolia": "hardhat run scripts/deploy.ts --network baseSepolia",
+    "generate-wallet": "hardhat run scripts/generateWallet.ts",
+    "check-balance": "hardhat run scripts/checkBalance.ts --network sepolia",
+    "check-balance:baseSepolia": "hardhat run scripts/checkBalance.ts --network baseSepolia",
+    "smoke-test:sepolia": "hardhat run scripts/smokeTestFactory.ts --network sepolia"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "dotenv": "^16.4.5",
+    "hardhat": "^2.22.10",
+    "typescript": "^5.6.3"
+  }
+}

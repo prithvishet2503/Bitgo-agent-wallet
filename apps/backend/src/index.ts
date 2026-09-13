@@ -1,3 +1,4 @@
+import './env.js'; // must be first - loads .env before chainExecutor.ts reads process.env
 import { createApp } from './app.js';
 import { seedDemoData } from './store/db.js';
 import { startApprovalTimeoutSweeper } from './scheduler/approvalTimeoutSweeper.js';

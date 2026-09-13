@@ -53,6 +53,7 @@ export const PolicyDenialCodeSchema = z.enum([
   'DESTINATION_NOT_ALLOWLISTED',
   'SESSION_EXPIRED',
   'SUB_WALLET_SUSPENDED',
+  'SUB_WALLET_NOT_DEPLOYED',
 ]);
 export type PolicyDenialCode = z.infer<typeof PolicyDenialCodeSchema>;
 

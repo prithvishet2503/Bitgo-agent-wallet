@@ -17,7 +17,7 @@ import { incomingDao } from '../dal/models/incoming.dao.js';
 import * as auditService from './auditService.js';
 import * as enterpriseService from './enterpriseService.js';
 import * as sendQueueService from './sendQueueService.js';
-import type { Signer } from './signer.js';
+import type { ChainExecutor } from './chainExecutor.js';
 
 /** Section 6.1 - Agent Sub-Wallet Creation.
  * Creating a sub-wallet does not deploy its on-chain smart account inline - it
@@ -100,13 +100,18 @@ export function createSubWallet(input: CreateAgentSubWalletInput, actingUser: Us
 /** Called by the SendQueue worker (scheduler/sendQueueWorker.ts) once a
  * `wallet_deployment` entry is dequeued. Idempotent: a second call on an
  * already-deployed sub-wallet is a no-op, the same protection wallet-platform
- * gets from its atomic `findOneAndUpdate` on `pendingDeployment`. */
-export async function completeDeployment(id: string, signerImpl: Signer): Promise<void> {
+ * gets from its atomic `findOneAndUpdate` on `pendingDeployment`.
+ *
+ * The worker calling this holds the chain executor directly - no separate
+ * service is involved. In real mode (chainExecutor.ts) this is an actual
+ * on-chain deployment via AgentSubWalletFactory, signed and broadcast by the
+ * backend's own key. */
+export async function completeDeployment(id: string, executor: ChainExecutor): Promise<void> {
   const subWallet = getSubWallet(id);
   if (!subWallet.pendingDeployment) return;
 
-  const { signature } = await signerImpl.sign(id, 'wallet_initialization');
-  subWallet.address = `0xagent${id.slice(-12)}`;
+  const { address, txHash } = await executor.deploySubWallet({ subWalletId: id, agentName: subWallet.agentName });
+  subWallet.address = address;
   subWallet.pendingDeployment = false;
   subWallet.walletFullyCreated = true;
   subWalletDao.createOrUpdate(subWallet);
@@ -117,8 +122,8 @@ export async function completeDeployment(id: string, signerImpl: Signer): Promis
     eventType: 'SUB_WALLET_DEPLOYED',
     actorUserId: null,
     actorType: 'system',
-    summary: `Agent sub-wallet deployed on-chain at ${subWallet.address}`,
-    metadata: { signature },
+    summary: `Agent sub-wallet deployed on-chain at ${subWallet.address} (${executor.mode} mode)`,
+    metadata: { txHash, chainMode: executor.mode },
   });
 }
 

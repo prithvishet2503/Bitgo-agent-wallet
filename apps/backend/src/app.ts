@@ -11,6 +11,7 @@ import { auditLogRouter } from './routes/auditLog.js';
 import { incomingRouter } from './routes/incoming.js';
 import { screeningRouter } from './routes/screening.js';
 import { chainRouter } from './routes/chain.js';
+import { riskRouter } from './routes/risk.js';
 import { authMiddleware } from './middleware/auth.js';
 import { resolveEnterprise } from './middleware/enterprise.js';
 import { errorHandler } from './middleware/errorHandler.js';
@@ -39,6 +40,7 @@ export function createApp(x402Middleware?: RequestHandler | null): Express {
   app.use('/api/v1/enterprises', enterprisesRouter);
   app.use('/api/v1/screening', screeningRouter);
   app.use('/api/v1/chain', chainRouter);
+  app.use('/api/v1/risk', riskRouter);
 
   // x402 payment check: protects write endpoints after auth, before enterprise
   // resolution. Only added when configured (real chain mode with signing key).

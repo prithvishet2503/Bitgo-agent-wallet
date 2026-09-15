@@ -542,3 +542,38 @@ select {
   justify-content: center;
   color: var(--text-dim);
 }
+
+/* Section 5.2 / 12.4 - Risk-grading engine styles */
+.risk-score-low {
+  color: var(--brand-bright);
+  font-weight: 700;
+}
+
+.risk-score-medium {
+  color: var(--warn);
+  font-weight: 700;
+}
+
+.risk-score-high {
+  color: var(--bad);
+  font-weight: 700;
+}
+
+.risk-badge-low {
+  color: var(--brand-bright);
+}
+
+.risk-badge-medium {
+  color: var(--warn);
+}
+
+.risk-badge-high {
+  color: var(--bad);
+  font-weight: 600;
+}
+
+.risk-badge-critical {
+  color: var(--bad);
+  font-weight: 700;
+  text-transform: uppercase;
+}

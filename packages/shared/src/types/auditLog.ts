@@ -30,6 +30,8 @@ export const AuditEventTypeSchema = z.enum([
   'QUARANTINE_RELEASED',
   'GAS_SPONSORSHIP_APPLIED',
   'GAS_SPONSORSHIP_CAP_EXCEEDED',
+  'RISK_ASSESSED',
+  'TRUST_SCORE_CHANGED',
 ]);
 export type AuditEventType = z.infer<typeof AuditEventTypeSchema>;
 

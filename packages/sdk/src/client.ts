@@ -14,6 +14,7 @@ import type {
   Pact,
   ReleaseQuarantineInput,
   SimulateIncomingTransactionInput,
+  SubWalletRiskSummary,
   TransactionRecord,
   TransactionRequestInput,
 } from '@bitgo-agent-wallet/shared';
@@ -251,6 +252,11 @@ export class BitGoAgentWalletClient {
       if (value !== undefined) params.set(key, String(value));
     }
     return this.request('GET', `/audit-log?${params.toString()}`);
+  }
+
+  // --- Section 5.2 / 12.4: Risk-Grading Engine ---
+  async getRiskSummary(subWalletId: string): Promise<SubWalletRiskSummary> {
+    return this.request('GET', `/risk/${subWalletId}/risk-summary`);
   }
 
   // --- Section 6.9: Incoming Transaction Screening ---

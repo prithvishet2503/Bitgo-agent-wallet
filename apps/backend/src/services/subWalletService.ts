@@ -10,7 +10,7 @@ import {
   hasPermission,
   nowIso,
 } from '@bitgo-agent-wallet/shared';
-import { type User } from '../store/db.js';
+import type { User } from '../store/db.js';
 import { subWalletDao } from '../dal/models/subWallet.dao.js';
 import { transactionDao } from '../dal/models/transaction.dao.js';
 import { incomingDao } from '../dal/models/incoming.dao.js';
@@ -23,7 +23,17 @@ import type { ChainExecutor } from './chainExecutor.js';
  * Creating a sub-wallet does not deploy its on-chain smart account inline - it
  * writes the record with `pendingDeployment: true` and enqueues a SendQueue entry
  * (mirrors wallet-platform's `AbstractEthLikeWalletDeployer`, which writes a
- * `SendQueue` document rather than signing/broadcasting the deployment tx itself).
+ * pending-deployment wallet document before the deployment transaction lands on
+ * chain). The SendQueue worker (`scheduler/sendQueueWorker.ts`) picks up the entry
+ * and calls `completeDeployment` below.
+ *
+ * This means:
+ * - `POST /sub-wallets` returns near-instantly with the sub-wallet in
+ *   `pendingDeployment` state and `address: null`.
+ * - The frontend shows "Pending" until the SendQueue worker resolves it.
+ * - A transaction submitted during deployment is denied immediately
+ *   (`SUB_WALLET_NOT_DEPLOYED`) rather than racing ahead of the deployment.
+ *
  * `completeDeployment` below is what the SendQueue worker calls to resolve it. */
 export function createSubWallet(input: CreateAgentSubWalletInput, actingUser: User): AgentSubWallet {
   const enterprise = enterpriseService.assertAccessible(input.enterpriseId, actingUser);
@@ -60,6 +70,16 @@ export function createSubWallet(input: CreateAgentSubWalletInput, actingUser: Us
     status: 'active',
     eip7702Delegated: false,
     pactId: null,
+    // Section 12.4 - Initial trust score: perfect score for a new sub-wallet.
+    trustScore: {
+      score: 100,
+      lastUpdated: nowIso(),
+      totalTransactions: 0,
+      cleanAutoExecutes: 0,
+      policyViolations: 0,
+      screeningFlags: 0,
+      quarantineEvents: 0,
+    },
     createdByUserId: actingUser.id,
     createdAt: nowIso(),
     suspendedAt: null,
@@ -84,14 +104,15 @@ export function createSubWallet(input: CreateAgentSubWalletInput, actingUser: Us
     entryType: 'wallet_deployment',
     relatedId: subWallet.id,
   });
+
   auditService.record({
     enterpriseId: subWallet.enterpriseId,
     subWalletId: subWallet.id,
     eventType: 'SUB_WALLET_DEPLOYMENT_QUEUED',
-    actorUserId: null,
-    actorType: 'system',
-    summary: 'On-chain smart-account deployment queued',
-    metadata: { sendQueueEntryId: queueEntry.id },
+    actorUserId: actingUser.id,
+    actorType: 'user',
+    summary: `Sub-wallet "${subWallet.agentName}" deployment queued for on-chain deployment`,
+    metadata: { sendQueueEntryId: queueEntry.id, subWalletId: subWallet.id },
   });
 
   return subWallet;
@@ -99,22 +120,21 @@ export function createSubWallet(input: CreateAgentSubWalletInput, actingUser: Us
 
 /** Called by the SendQueue worker (scheduler/sendQueueWorker.ts) once a
  * `wallet_deployment` entry is dequeued. Idempotent: a second call on an
- * already-deployed sub-wallet is a no-op, the same protection wallet-platform
- * gets from its atomic `findOneAndUpdate` on `pendingDeployment`.
- *
- * The worker calling this holds the chain executor directly - no separate
- * service is involved. In real mode (chainExecutor.ts) this is an actual
- * on-chain deployment via AgentSubWalletFactory, signed and broadcast by the
- * backend's own key. */
+ * already-deployed sub-wallet is a no-op so that the worker's at-least-once
+ * processing is safe. In real chain mode this is a real on-chain deployment
+ * via the AgentSubWalletFactory; in mock mode it synthesises an address and
+ * tx hash. */
 export async function completeDeployment(id: string, executor: ChainExecutor): Promise<void> {
   const subWallet = getSubWallet(id);
-  if (!subWallet.pendingDeployment) return;
+  if (subWallet.walletFullyCreated) return; // idempotent
 
-  const { address, txHash, fundingTxHash } = await executor.deploySubWallet({ subWalletId: id, agentName: subWallet.agentName });
-  subWallet.address = address;
-  subWallet.pendingDeployment = false;
-  subWallet.walletFullyCreated = true;
-  subWalletDao.createOrUpdate(subWallet);
+  const deploymentResult = await executor.deploySubWallet({ subWalletId: id, agentName: subWallet.agentName });
+  subWalletDao.createOrUpdate({
+    ...subWallet,
+    address: deploymentResult.address,
+    pendingDeployment: false,
+    walletFullyCreated: true,
+  });
 
   auditService.record({
     enterpriseId: subWallet.enterpriseId,
@@ -122,10 +142,8 @@ export async function completeDeployment(id: string, executor: ChainExecutor): P
     eventType: 'SUB_WALLET_DEPLOYED',
     actorUserId: null,
     actorType: 'system',
-    summary: fundingTxHash
-      ? `Agent sub-wallet deployed on-chain at ${subWallet.address} and funded (${executor.mode} mode)`
-      : `Agent sub-wallet deployed on-chain at ${subWallet.address} (${executor.mode} mode)`,
-    metadata: { txHash, fundingTxHash, chainMode: executor.mode },
+    summary: `Sub-wallet "${subWallet.agentName}" deployed on-chain at ${deploymentResult.address}`,
+    metadata: { address: deploymentResult.address, txHash: deploymentResult.txHash },
   });
 }
 
@@ -152,38 +170,28 @@ export function suspendSubWallet(id: string, actingUser: User, reason: string | 
   const subWallet = getSubWallet(id);
   assertSameEnterprise(subWallet, actingUser);
   if (!hasPermission(actingUser.role, PERMISSIONS.WALLET_SUSPEND)) {
-    throw new ForbiddenError('Only admin/compliance roles can suspend an agent sub-wallet');
+    throw new ForbiddenError('Your role cannot suspend an agent sub-wallet');
   }
-  if (subWallet.status === 'suspended') return subWallet;
+  if (subWallet.status === 'suspended') {
+    throw new DomainError(`Sub-wallet ${subWallet.agentName} is already suspended`, 'ALREADY_SUSPENDED', 409);
+  }
 
-  subWallet.status = 'suspended';
-  subWallet.suspendedAt = nowIso();
-  subWallet.suspendedByUserId = actingUser.id;
-  subWallet.suspendedReason = reason;
-  subWalletDao.createOrUpdate(subWallet);
+  const updated: AgentSubWallet = { ...subWallet, status: 'suspended', suspendedAt: nowIso(), suspendedByUserId: actingUser.id, suspendedReason: reason };
+  subWalletDao.createOrUpdate(updated);
+  notifyAllAdmins(updated, actingUser, reason);
+  return updated;
+}
 
+function notifyAllAdmins(subWallet: AgentSubWallet, actingUser: User, reason: string | null): void {
   auditService.record({
     enterpriseId: subWallet.enterpriseId,
     subWalletId: subWallet.id,
     eventType: 'SUB_WALLET_SUSPENDED',
     actorUserId: actingUser.id,
     actorType: 'user',
-    summary: `Agent sub-wallet "${subWallet.agentName}" suspended (kill switch)`,
-    metadata: { reason },
+    summary: `Sub-wallet "${subWallet.agentName}" suspended by ${actingUser.name}${reason ? `: ${reason}` : ''}`,
+    metadata: { suspendedBy: actingUser.id, reason },
   });
-
-  // "Suspension event triggers immediate notification to all admins on the account."
-  notifyAllAdmins(subWallet, actingUser, reason);
-
-  return subWallet;
-}
-
-function notifyAllAdmins(subWallet: AgentSubWallet, actingUser: User, reason: string | null): void {
-  // eslint-disable-next-line no-console
-  console.log(
-    `[notify:enterprise-admins:${subWallet.enterpriseId}] Agent sub-wallet "${subWallet.agentName}" was suspended by ${actingUser.name}` +
-      (reason ? ` (${reason})` : ''),
-  );
 }
 
 /** Section 6.4 - Autonomy Modes.
@@ -193,23 +201,21 @@ export function setAutonomyMode(id: string, mode: AutonomyMode, actingUser: User
   const subWallet = getSubWallet(id);
   assertSameEnterprise(subWallet, actingUser);
   if (!hasPermission(actingUser.role, PERMISSIONS.AUTONOMY_MODE_CHANGE)) {
-    throw new ForbiddenError('Only admin/compliance roles can change autonomy mode');
+    throw new ForbiddenError('Your role cannot change autonomy mode');
   }
-  const previousMode = subWallet.autonomyMode;
-  if (previousMode === mode) return subWallet;
-
-  subWallet.autonomyMode = mode;
-  subWalletDao.createOrUpdate(subWallet);
+  const previous = subWallet.autonomyMode;
+  const updated: AgentSubWallet = { ...subWallet, autonomyMode: mode };
+  subWalletDao.createOrUpdate(updated);
   auditService.record({
     enterpriseId: subWallet.enterpriseId,
     subWalletId: subWallet.id,
     eventType: 'AUTONOMY_MODE_CHANGED',
     actorUserId: actingUser.id,
     actorType: 'user',
-    summary: `Autonomy mode changed from ${previousMode} to ${mode}`,
-    metadata: { previousMode, newMode: mode },
+    summary: `Autonomy mode changed from ${previous} to ${mode} by ${actingUser.name}`,
+    metadata: { previousMode: previous, newMode: mode },
   });
-  return subWallet;
+  return updated;
 }
 
 /** Section 6.10 - Gas Sponsorship via EIP-7702.
@@ -218,13 +224,28 @@ export function setAutonomyMode(id: string, mode: AutonomyMode, actingUser: User
 export function delegateEip7702(id: string, actingUser: User): AgentSubWallet {
   const subWallet = getSubWallet(id);
   assertSameEnterprise(subWallet, actingUser);
-  subWallet.eip7702Delegated = true;
-  subWalletDao.createOrUpdate(subWallet);
-  return subWallet;
+  if (!hasPermission(actingUser.role, PERMISSIONS.AUTONOMY_MODE_CHANGE)) {
+    throw new ForbiddenError('Your role cannot change gas sponsorship settings');
+  }
+  if (subWallet.eip7702Delegated) {
+    throw new DomainError(`Sub-wallet ${subWallet.agentName} is already delegated`, 'ALREADY_DELEGATED', 409);
+  }
+  const updated: AgentSubWallet = { ...subWallet, eip7702Delegated: true };
+  subWalletDao.createOrUpdate(updated);
+  auditService.record({
+    enterpriseId: subWallet.enterpriseId,
+    subWalletId: subWallet.id,
+    eventType: 'GAS_SPONSORSHIP_APPLIED',
+    actorUserId: actingUser.id,
+    actorType: 'user',
+    summary: `EIP-7702 delegation enabled for sub-wallet "${subWallet.agentName}"`,
+    metadata: {},
+  });
+  return updated;
 }
 
 export interface BalanceSummary {
-  fundingSource: AgentSubWallet['fundingSource'];
+  fundingSource: string;
   allocatedOrLimitUsd: number;
   spentUsd: number;
   quarantinedUsd: number;
@@ -242,26 +263,21 @@ export function getBalanceSummary(subWallet: AgentSubWallet): BalanceSummary {
     .list((t) => t.subWalletId === subWallet.id && t.quarantine?.status === 'quarantined')
     .reduce((sum, t) => sum + t.valueUsd, 0);
 
-  const releasedIncomingUsd = incomingDao
-    .list((t) => t.subWalletId === subWallet.id && (t.quarantine === null || t.quarantine.status === 'released'))
-    .reduce((sum, t) => sum + t.valueUsd, 0);
+  const allocatedOrLimit = subWallet.fundingSource === 'allocated_balance'
+    ? subWallet.allocatedBalanceUsd
+    : subWallet.drawDownLimitUsd ?? 0;
 
-  const allocatedOrLimitUsd =
-    subWallet.fundingSource === 'allocated_balance'
-      ? subWallet.allocatedBalanceUsd
-      : (subWallet.drawDownLimitUsd ?? 0);
-
-  const availableUsd = Math.max(0, allocatedOrLimitUsd + releasedIncomingUsd - spentUsd);
-
-  return { fundingSource: subWallet.fundingSource, allocatedOrLimitUsd, spentUsd, quarantinedUsd, availableUsd };
+  return {
+    fundingSource: subWallet.fundingSource,
+    allocatedOrLimitUsd: allocatedOrLimit,
+    spentUsd,
+    quarantinedUsd,
+    availableUsd: Math.max(0, allocatedOrLimit - spentUsd - quarantinedUsd),
+  };
 }
 
 export function assertActive(subWallet: AgentSubWallet): void {
   if (subWallet.status === 'suspended') {
-    throw new DomainError(
-      `Agent sub-wallet "${subWallet.agentName}" is suspended`,
-      'SUB_WALLET_SUSPENDED',
-      409,
-    );
+    throw new DomainError(`Sub-wallet ${subWallet.agentName} is suspended`, 'SUB_WALLET_SUSPENDED', 403);
   }
 }

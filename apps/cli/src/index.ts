@@ -7,12 +7,16 @@ import { loadConfig, saveConfig } from './config.js';
  * Section 6.7 - Developer Tooling: CLI.
  * "CLI: authenticate, create-agent-wallet, send, get-balance, get-status, revoke
  * commands." Every command below is a thin call into the SDK client
- * (@bitgo-agent-wallet/sdk), which is itself a thin call into the REST API -
- * there is no logic duplicated here.
+ * (@bitgo-agent-wallet/sdk), which is itself a thin call into the REST API
+ * (apps/backend), so there is exactly one implementation of every governance rule.
  */
 
 function clientFromConfig(): BitGoAgentWalletClient {
   const config = loadConfig();
+  if (!config.apiToken) {
+    console.error('Not authenticated. Run `authenticate <token>` first, or use `create-organization`.');
+    process.exit(1);
+  }
   return new BitGoAgentWalletClient({ baseUrl: config.baseUrl, apiToken: config.apiToken, enterpriseId: config.enterpriseId });
 }
 
@@ -25,11 +29,14 @@ async function run(fn: () => Promise<void>): Promise<void> {
     await fn();
   } catch (err) {
     if (err instanceof BitGoAgentWalletApiError) {
-      console.error(`Error [${err.code}]: ${err.message}`);
+      console.error(`Error [${err.code}] (${err.httpStatus}): ${err.message}`);
+      if (err.issues) console.error(JSON.stringify(err.issues, null, 2));
+    } else if (err instanceof Error) {
+      console.error(err.message);
     } else {
       console.error(err);
     }
-    process.exitCode = 1;
+    process.exit(1);
   }
 }
 
@@ -45,12 +52,8 @@ program
     run(async () => {
       const client = new BitGoAgentWalletClient({ baseUrl: opts.baseUrl });
       const identity = await client.authenticate(apiToken);
-      saveConfig({ baseUrl: opts.baseUrl, apiToken: identity.apiToken, enterpriseId: identity.enterpriseId });
-      console.log(`Authenticated as ${identity.name} (${identity.role}) on enterprise ${identity.enterpriseId}`);
-      if (identity.accessibleEnterpriseIds.length > 1) {
-        console.log(`You also have access to: ${identity.accessibleEnterpriseIds.filter((e) => e !== identity.enterpriseId).join(', ')}`);
-        console.log('Switch with: bitgo-agent-wallet use-enterprise --enterprise-id <id>');
-      }
+      saveConfig({ apiToken: identity.apiToken, baseUrl: opts.baseUrl, enterpriseId: identity.enterpriseId });
+      printJson(identity);
     }),
   );
 
@@ -69,9 +72,7 @@ program
         enterpriseName: opts.enterpriseName,
         adminName: opts.adminName,
       });
-      saveConfig({ baseUrl: opts.baseUrl, apiToken: result.apiToken, enterpriseId: result.enterprise.id });
-      console.log(`Organization "${result.organization.name}" created with Enterprise "${result.enterprise.name}".`);
-      console.log(`Signed in as admin - API token saved to ~/.bitgo-agent-wallet/config.json`);
+      saveConfig({ apiToken: result.apiToken, baseUrl: opts.baseUrl, enterpriseId: result.enterprise.id });
       printJson(result);
     }),
   );
@@ -101,9 +102,10 @@ program
   .requiredOption('--enterprise-id <id>')
   .action((opts) =>
     run(async () => {
-      const config = loadConfig();
-      saveConfig({ ...config, enterpriseId: opts.enterpriseId });
-      console.log(`Now acting on enterprise ${opts.enterpriseId}`);
+      const client = clientFromConfig();
+      const enterprise = await client.getEnterprise(opts.enterpriseId);
+      saveConfig({ ...loadConfig(), enterpriseId: enterprise.id });
+      printJson({ switchedTo: enterprise.name, enterpriseId: enterprise.id });
     }),
   );
 
@@ -118,16 +120,16 @@ program
   .option('--autonomy-mode <mode>', 'strict | bounded_auto', 'strict')
   .action((opts) =>
     run(async () => {
-      const client = clientFromConfig();
-      const subWallet = await client.createAgentSubWallet({
-        agentName: opts.name,
-        chain: opts.chain,
-        fundingSource: opts.fundingSource,
-        allocatedBalanceUsd: Number(opts.allocatedBalance),
-        drawDownLimitUsd: opts.drawDownLimit ? Number(opts.drawDownLimit) : null,
-        autonomyMode: opts.autonomyMode,
-      });
-      printJson(subWallet);
+      printJson(
+        await clientFromConfig().createAgentSubWallet({
+          agentName: opts.name,
+          chain: opts.chain,
+          fundingSource: opts.fundingSource,
+          allocatedBalanceUsd: Number(opts.allocatedBalance),
+          drawDownLimitUsd: opts.drawDownLimit ? Number(opts.drawDownLimit) : null,
+          autonomyMode: opts.autonomyMode,
+        }),
+      );
     }),
   );
 
@@ -151,23 +153,23 @@ program
   .option('--destination-allowlist <addrs>', 'Comma-separated destination allowlist', '')
   .action((opts) =>
     run(async () => {
-      const csv = (s: string): string[] => (s ? s.split(',').map((x) => x.trim()).filter(Boolean) : []);
-      const pact = await clientFromConfig().createPact({
-        subWalletId: opts.subWalletId,
-        maxTransactionValueUsd: Number(opts.maxTxValue),
-        dailySpendCapUsd: Number(opts.dailyCap),
-        weeklySpendCapUsd: Number(opts.weeklyCap),
-        contractAllowlist: [],
-        protocolAllowlist: [],
-        networkAllowlist: csv(opts.networkAllowlist),
-        destinationAllowlist: csv(opts.destinationAllowlist),
-        destinationDenylist: [],
-        sessionExpiresAt: null,
-        gasSponsorshipCapUsdPerTx: null,
-        gasSponsorshipCapUsdPerDay: null,
-        gasSponsorshipFallback: 'own_balance',
-      });
-      printJson(pact);
+      printJson(
+        await clientFromConfig().createPact({
+          subWalletId: opts.subWalletId,
+          maxTransactionValueUsd: Number(opts.maxTxValue),
+          dailySpendCapUsd: Number(opts.dailyCap),
+          weeklySpendCapUsd: Number(opts.weeklyCap),
+          networkAllowlist: opts.networkAllowlist ? opts.networkAllowlist.split(',').map((s: string) => s.trim()) : [],
+          contractAllowlist: [],
+          protocolAllowlist: [],
+          destinationAllowlist: opts.destinationAllowlist ? opts.destinationAllowlist.split(',').map((s: string) => s.trim()) : [],
+          destinationDenylist: [],
+          sessionExpiresAt: null,
+          gasSponsorshipCapUsdPerTx: null,
+          gasSponsorshipCapUsdPerDay: null,
+          gasSponsorshipFallback: 'own_balance',
+        }),
+      );
     }),
   );
 
@@ -183,16 +185,17 @@ program
   .option('--function-description <desc>', 'Human-readable description of the call', 'transfer')
   .action((opts) =>
     run(async () => {
-      const tx = await clientFromConfig().send({
-        subWalletId: opts.subWalletId,
-        to: opts.to,
-        valueUsd: Number(opts.valueUsd),
-        network: opts.network,
-        contractAddress: opts.contractAddress ?? null,
-        protocol: opts.protocol ?? null,
-        functionDescription: opts.functionDescription,
-      });
-      printJson(tx);
+      printJson(
+        await clientFromConfig().send({
+          subWalletId: opts.subWalletId,
+          to: opts.to,
+          valueUsd: Number(opts.valueUsd),
+          network: opts.network,
+          contractAddress: opts.contractAddress ?? null,
+          protocol: opts.protocol ?? null,
+          functionDescription: opts.functionDescription,
+        }),
+      );
     }),
   );
 
@@ -263,6 +266,16 @@ program
           limit: Number(opts.limit),
         }),
       );
+    }),
+  );
+
+program
+  .command('risk-summary')
+  .description('Get risk-grading summary for a sub-wallet (Section 5.2 / 12.4)')
+  .requiredOption('--sub-wallet-id <id>')
+  .action((opts) =>
+    run(async () => {
+      printJson(await clientFromConfig().getRiskSummary(opts.subWalletId));
     }),
   );
 

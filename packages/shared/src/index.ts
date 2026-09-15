@@ -11,3 +11,4 @@ export * from './types/auditLog.js';
 export * from './types/incomingScreening.js';
 export * from './types/gasSponsorship.js';
 export * from './types/sendQueue.js';
+export * from './types/risk.js';

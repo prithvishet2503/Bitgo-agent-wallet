@@ -5,6 +5,14 @@ import { startApprovalTimeoutSweeper } from './scheduler/approvalTimeoutSweeper.
 import { startSendQueueWorker } from './scheduler/sendQueueWorker.js';
 import { createX402Middleware } from './services/x402Service.js';
 
+// Catch async errors that would otherwise crash the process without a trace.
+process.on('unhandledRejection', (reason) => {
+  console.error('[unhandledRejection]', reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[uncaughtException]', err);
+});
+
 seedDemoData();
 
 const x402Middleware = await createX402Middleware();

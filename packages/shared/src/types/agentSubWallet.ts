@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { AutonomyModeSchema } from './autonomy.js';
 import { SupportedChainSchema } from './common.js';
+import { TrustScoreSchema } from './risk.js';
 
 /** Section 6.1 - Agent Sub-Wallet Creation.
  * A distinct wallet type scoped to a single agent identity, with its own keys/session,
@@ -45,6 +46,10 @@ export const AgentSubWalletSchema = z.object({
    * (Section 6.10). Undelegated sub-wallets pay their own gas. */
   eip7702Delegated: z.boolean().default(false),
   pactId: z.string().nullable(),
+  /** Section 12.4 - Rolling trust score based on historical compliance behaviour.
+   * Updated after every transaction attempt. Defaults to 100 (perfect) for a
+   * newly created sub-wallet. */
+  trustScore: TrustScoreSchema,
   createdByUserId: z.string(),
   createdAt: z.string(),
   suspendedAt: z.string().nullable().default(null),

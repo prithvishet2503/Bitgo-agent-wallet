@@ -15,18 +15,21 @@ import * as subWalletService from './subWalletService.js';
 import * as pactService from './pactService.js';
 import * as simulationService from './simulationService.js';
 import * as screeningService from './screeningService.js';
-import * as gasSponsorshipService from './gasSponsorshipService.js';
 import * as approvalService from './approvalService.js';
 import * as sendQueueService from './sendQueueService.js';
+import * as gasSponsorshipService from './gasSponsorshipService.js';
 import * as auditService from './auditService.js';
+import * as riskService from './riskService.js';
 import type { ChainExecutor } from './chainExecutor.js';
 
 /**
  * Orchestrates the full agent-transaction lifecycle described across Sections
- * 6.2-6.5 and 6.10: pre-execution checks -> policy evaluation -> autonomy-mode
- * routing -> (auto-proceed | human approval) -> gas-sponsorship decision ->
- * SendQueue. Mirrors wallet-platform's `send.ts` in one respect only: everything
- * up through deciding *that* a transaction should go out happens inline in the
+ * 6.2-6.5 and 6.10: pre-execution checks -> risk assessment -> policy
+ * evaluation -> autonomy-mode routing -> (auto-proceed | human approval) ->
+ * gas-sponsorship decision -> SendQueue.
+ *
+ * Mirrors wallet-platform's `send.ts` in one respect only: everything up
+ * through deciding *that* a transaction should go out happens inline in the
  * request, and actual signing/broadcasting happens later, off a
  * `SendQueueEntry` (`completeBroadcast`, called by
  * scheduler/sendQueueWorker.ts) - never synchronously inside the HTTP request.
@@ -47,6 +50,7 @@ function newRecordShell(request: TransactionRequestInput, subWallet: { id: strin
     simulation: null,
     screening: null,
     policyViolations: [],
+    riskAssessment: null,
     gasSponsored: false,
     gasSponsorshipFallbackUsed: false,
     createdAt: nowIso(),
@@ -97,10 +101,7 @@ export async function submitTransaction(request: TransactionRequestInput, acting
     return record;
   }
 
-  // A sub-wallet still waiting on its on-chain deployment (SendQueue
-  // "wallet_deployment" entry) has no address yet - nothing to execute() from.
-  // In real chain mode this can take a real block time to resolve, so this is
-  // a genuine race, not just a formality.
+  // A sub-wallet still waiting on its on-chain deployment has no address yet.
   if (subWallet.pendingDeployment || !subWallet.address) {
     record.policyViolations = [
       { code: 'SUB_WALLET_NOT_DEPLOYED', message: `Sub-wallet ${subWallet.agentName} is still deploying on-chain; try again shortly` },
@@ -120,7 +121,7 @@ export async function submitTransaction(request: TransactionRequestInput, acting
     return record;
   }
 
-  // Section 6.3 - pre-execution simulation, before anything else can happen.
+  // Section 6.3 - pre-execution simulation, before anything else.
   const simulation = simulationService.simulate(request);
   record.simulation = simulation;
   auditService.record({
@@ -136,17 +137,34 @@ export async function submitTransaction(request: TransactionRequestInput, acting
     record.status = 'simulation_failed';
     record.decidedAt = nowIso();
     transactionDao.createOrUpdate(record);
+
+    // Section 12.4 - Penalize trust score for failed simulation.
+    riskService.updateTrustScore(subWallet, {
+      wasExecuted: false,
+      hadPolicyViolation: true,
+      hadScreeningFlag: false,
+      hadQuarantineEvent: false,
+    });
+
     return record;
   }
 
-  // Section 6.3 - threat/sanctions screening. "Failed screening = hard block, not
-  // just a flag" - this overrides autonomy mode entirely, in both directions.
+  // Section 6.3 - threat/sanctions screening. Hard block on flagged.
   const screening = await screeningService.screenOutgoing(request.to, request.contractAddress, request.network);
   record.screening = screening;
   if (screening.verdict === 'flagged') {
     record.status = 'screening_blocked';
     record.decidedAt = nowIso();
     transactionDao.createOrUpdate(record);
+
+    // Section 12.4 - Penalize trust score for screening flag.
+    riskService.updateTrustScore(subWallet, {
+      wasExecuted: false,
+      hadPolicyViolation: false,
+      hadScreeningFlag: true,
+      hadQuarantineEvent: false,
+    });
+
     auditService.record({
       enterpriseId: subWallet.enterpriseId,
       subWalletId: subWallet.id,
@@ -159,7 +177,8 @@ export async function submitTransaction(request: TransactionRequestInput, acting
     return record;
   }
 
-  // Section 6.2 - Pact evaluation.
+  // Section 6.2 - Pact evaluation (must exist before risk assessment can
+  // reference its limits).
   const pact = pactService.getPactForSubWallet(subWallet.id);
   if (!pact) {
     throw new DomainError(
@@ -171,12 +190,26 @@ export async function submitTransaction(request: TransactionRequestInput, acting
   const evaluation = pactService.evaluate(subWallet, pact, request);
   record.policyViolations = evaluation.violations;
 
-  // Section 6.4 - Autonomy Modes.
-  // Strict: every transaction pauses for human approval regardless of compliance.
-  // Bounded Auto: compliant transactions proceed straight to the SendQueue;
-  // out-of-policy transactions escalate to a human rather than being silently
-  // allowed or silently dropped.
-  const requiresApproval = subWallet.autonomyMode === 'strict' || !evaluation.compliant;
+  // Section 5.2 / 12.9 - Risk-grading assessment. Produced after screening
+  // (which already determined the address isn't blocked) and policy evaluation
+  // (so we have the Pact limits for the value/vs-max and velocity factors).
+  // High/critical risk tiers auto-escalate to human approval even in Bounded
+  // Auto mode (user-confirmed behaviour).
+  const riskAssessment = riskService.assessTransactionRisk(
+    subWallet,
+    pact,
+    request,
+    simulation,
+    screening,
+  );
+  record.riskAssessment = riskAssessment;
+
+  // Section 6.4 - Autonomy Modes + risk escalation.
+  // Strict: every transaction pauses for human approval.
+  // Bounded Auto: compliant transactions proceed; out-of-policy or
+  // high/critical risk transactions escalate to human approval.
+  const riskEscalates = riskService.requiresHumanApproval(riskAssessment.tier);
+  const requiresApproval = subWallet.autonomyMode === 'strict' || !evaluation.compliant || riskEscalates;
 
   if (!requiresApproval) {
     queueForBroadcast(record, subWallet, pact, { auto: true });
@@ -194,10 +227,12 @@ export async function submitTransaction(request: TransactionRequestInput, acting
     eventType: 'APPROVAL_REQUESTED',
     actorUserId: null,
     actorType: 'system',
-    summary: evaluation.compliant
-      ? `Approval requested (Strict Mode) for $${request.valueUsd} to ${request.to}`
-      : `Approval requested: out-of-policy transaction (${evaluation.violations.map((v) => v.code).join(', ')})`,
-    metadata: { transactionId: record.id, approvalRequestId: approval.id, violations: evaluation.violations },
+    summary: riskEscalates
+      ? `Approval requested: risk-grading classified as ${riskAssessment.tier} (score ${riskAssessment.overallScore})`
+      : evaluation.compliant
+        ? `Approval requested (Strict Mode) for $${request.valueUsd} to ${request.to}`
+        : `Approval requested: out-of-policy (${evaluation.violations.map((v) => v.code).join(', ')})`,
+    metadata: { transactionId: record.id, approvalRequestId: approval.id, violations: evaluation.violations, riskAssessment },
   });
   return record;
 }
@@ -261,19 +296,20 @@ function queueForBroadcast(
  * `transaction_broadcast` entry is dequeued - the only place a transaction
  * actually flips to `executed`. Idempotent against re-processing.
  *
- * In real chain mode (chainExecutor.ts) this is a real, signed, broadcast
- * transaction calling the deployed AgentSubWallet's `execute()` - with zero
- * value and empty calldata, so it proves the sign-and-broadcast path end to
- * end without moving real funds (`valueUsd` stays a backend-tracked ledger
- * figure, not a wei amount actually transferred on-chain). */
+ * In mock mode this is near-instant; in real chain mode this calls
+ * executor.executeTransaction() which signs and broadcasts a real on-chain
+ * transaction. The value moved on-chain is a tiny fraction of the USD figure
+ * (see CHAIN_VALUE_SCALE_FACTOR in env.ts) - the backend still tracks the USD
+ * figure as the authoritative record.
+ *
+ * Also updates the sub-wallet's trust score (Section 12.4) for a clean
+ * auto-execution. */
 export async function completeBroadcast(id: string, executor: ChainExecutor): Promise<void> {
   const record = getTransaction(id);
   if (record.status !== 'approved') return;
 
   const subWallet = subWalletService.getSubWallet(record.subWalletId);
   if (!subWallet.address) {
-    // Shouldn't happen (submitTransaction already guards this), but never
-    // execute() against a wallet with no address.
     throw new DomainError('Cannot broadcast: sub-wallet has no on-chain address yet', 'SUB_WALLET_NOT_DEPLOYED', 409);
   }
 
@@ -301,6 +337,15 @@ export async function completeBroadcast(id: string, executor: ChainExecutor): Pr
   record.executedAt = nowIso();
   transactionDao.createOrUpdate(record);
 
+  // Section 12.4 - Update trust score for a clean execution.
+  const freshSubWallet = subWalletService.getSubWallet(record.subWalletId);
+  riskService.updateTrustScore(freshSubWallet, {
+    wasExecuted: true,
+    hadPolicyViolation: false,
+    hadScreeningFlag: false,
+    hadQuarantineEvent: false,
+  });
+
   auditService.record({
     enterpriseId: record.enterpriseId,
     subWalletId: record.subWalletId,
@@ -324,7 +369,8 @@ export function listTransactions(enterpriseId: string, subWalletId?: string): Tr
     .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
 }
 
-/** Section 6.5 - approve/deny a pending request. */
+/** Section 6.5 - approve/deny a pending request. Also updates trust score
+ * on denial. */
 export function handleApprovalDecision(
   input: ApprovalDecisionInput,
   actingUser: User,
@@ -351,6 +397,16 @@ export function handleApprovalDecision(
     transaction.status = 'denied';
     transaction.decidedAt = nowIso();
     transactionDao.createOrUpdate(transaction);
+
+    // Section 12.4 - Penalize trust score for policy violation / denial.
+    const subWallet = subWalletService.getSubWallet(transaction.subWalletId);
+    riskService.updateTrustScore(subWallet, {
+      wasExecuted: false,
+      hadPolicyViolation: transaction.policyViolations.length > 0,
+      hadScreeningFlag: false,
+      hadQuarantineEvent: false,
+    });
+
     auditService.record({
       enterpriseId: approval.enterpriseId,
       subWalletId: approval.subWalletId,
@@ -376,6 +432,16 @@ export function sweepExpiredApprovals(): void {
       transaction.status = 'denied';
       transaction.decidedAt = nowIso();
       transactionDao.createOrUpdate(transaction);
+
+      // Section 12.4 - Penalize trust score for timeout denial.
+      const subWallet = subWalletService.getSubWallet(transaction.subWalletId);
+      riskService.updateTrustScore(subWallet, {
+        wasExecuted: false,
+        hadPolicyViolation: transaction.policyViolations.length > 0,
+        hadScreeningFlag: false,
+        hadQuarantineEvent: false,
+      });
+
       auditService.record({
         enterpriseId: approval.enterpriseId,
         subWalletId: approval.subWalletId,

@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { PolicyDenialCodeSchema } from './pact.js';
+import { RiskAssessmentSchema } from './risk.js';
 
 /** Section 6.3 - Pre-Execution Checks: request payload an agent submits. */
 export const TransactionRequestInputSchema = z.object({
@@ -63,6 +64,9 @@ export const ScreeningResultSchema = z.object({
 });
 export type ScreeningResult = z.infer<typeof ScreeningResultSchema>;
 
+/** Section 6.3-6.5 - Full transaction record with pre-execution checks, risk
+ * assessment, and execution status. riskAssessment is populated by the
+ * risk-grading engine (Section 5.2 fast-follow / Section 12.4/12.9). */
 export const TransactionRecordSchema = z.object({
   id: z.string(),
   subWalletId: z.string(),
@@ -74,6 +78,10 @@ export const TransactionRecordSchema = z.object({
   policyViolations: z.array(
     z.object({ code: PolicyDenialCodeSchema, message: z.string() }),
   ).default([]),
+  /** Section 5.2 / 12.9 - Risk-grading assessment produced during the
+   * pre-execution pipeline. Null when risk assessment hasn't been run (e.g.
+   * very old transactions from before the engine was added). */
+  riskAssessment: RiskAssessmentSchema.nullable().default(null),
   gasSponsored: z.boolean().default(false),
   gasSponsorshipFallbackUsed: z.boolean().default(false),
   createdAt: z.string(),

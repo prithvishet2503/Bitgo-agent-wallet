@@ -3,6 +3,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { BitGoAgentWalletApiError, BitGoAgentWalletClient } from '@bitgo-agent-wallet/sdk';
+import { AuditEventTypeSchema } from '@bitgo-agent-wallet/shared';
 
 /**
  * Section 6.7 - Developer Tooling: MCP Server (transactional).
@@ -123,9 +124,22 @@ server.tool(
   'Query the immutable audit log of agent actions, policy decisions, and approvals (Section 6.8).',
   {
     subWalletId: z.string().optional(),
+    eventType: AuditEventTypeSchema.optional(),
+    from: z.string().optional(),
+    to: z.string().optional(),
     limit: z.number().max(1000).default(50),
   },
-  async (args) => safe(() => client.queryAuditLog(args)),
+  async (args) => {
+    const result = await client.queryAuditLog(args);
+    return textResult(result);
+  },
+);
+
+server.tool(
+  'get_risk_summary',
+  "Get risk-grading summary for a sub-wallet: current trust score and recent risk assessments (Section 5.2 / 12.4).",
+  { subWalletId: z.string() },
+  async ({ subWalletId }) => safe(() => client.getRiskSummary(subWalletId)),
 );
 
 const transport = new StdioServerTransport();

@@ -17,12 +17,18 @@ import type {
   TransactionRecord,
   TransactionRequestInput,
 } from '@bitgo-agent-wallet/shared';
+import type { ClientEvmSigner } from './x402.js';
+import { createPaymentHeaders } from './x402.js';
 
 export interface BitGoAgentWalletClientOptions {
   baseUrl?: string;
   apiToken?: string;
   enterpriseId?: string;
   fetchImpl?: typeof fetch;
+  /** Optional EVM signer for x402 payment protocol. When set, the client
+   * automatically handles 402 Payment Required responses by signing and
+   * retrying the request. */
+  x402Signer?: ClientEvmSigner;
 }
 
 export interface AuthenticatedIdentity {
@@ -50,20 +56,23 @@ export interface BootstrapOrganizationResult {
  * and MCP server (apps/mcp-server) are both built on top of this same client, so
  * "SDK/CLI/MCP" (Section 6.7) share one source of truth for request/response
  * shapes and error handling.
+ *
+ * When an x402Signer is configured, the client automatically handles HTTP 402
+ * Payment Required responses by signing and retrying — AI agents can pay per
+ * API call transparently (PRD Section 8).
  */
 export class BitGoAgentWalletClient {
   private baseUrl: string;
   private apiToken: string | undefined;
   private enterpriseId: string | undefined;
   private fetchImpl: typeof fetch;
+  private x402Signer: ClientEvmSigner | undefined;
 
   constructor(options: BitGoAgentWalletClientOptions = {}) {
     this.baseUrl = options.baseUrl ?? 'http://localhost:4000/api/v1';
     this.apiToken = options.apiToken;
     this.enterpriseId = options.enterpriseId;
-    // Bind to globalThis: browsers' native fetch throws "Illegal invocation" if
-    // called without `window` as the receiver, which happens once `fetch` is
-    // stored as a bare method reference on this class instance.
+    this.x402Signer = options.x402Signer;
     this.fetchImpl = options.fetchImpl ?? fetch.bind(globalThis);
   }
 
@@ -78,16 +87,40 @@ export class BitGoAgentWalletClient {
     this.enterpriseId = enterpriseId;
   }
 
+  /** Sets or clears the x402 EVM signer for automatic payment handling. */
+  setX402Signer(signer: ClientEvmSigner | undefined): void {
+    this.x402Signer = signer;
+  }
+
   private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
-    const res = await this.fetchImpl(`${this.baseUrl}${path}`, {
-      method,
-      headers: {
-        'content-type': 'application/json',
-        ...(this.apiToken ? { authorization: `Bearer ${this.apiToken}` } : {}),
-        ...(this.enterpriseId ? { 'x-enterprise-id': this.enterpriseId } : {}),
-      },
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
+    const url = `${this.baseUrl}${path}`;
+
+    const doFetch = async (extraHeaders?: Record<string, string>): Promise<Response> => {
+      return this.fetchImpl(url, {
+        method,
+        headers: {
+          'content-type': 'application/json',
+          ...(this.apiToken ? { authorization: `Bearer ${this.apiToken}` } : {}),
+          ...(this.enterpriseId ? { 'x-enterprise-id': this.enterpriseId } : {}),
+          ...extraHeaders,
+        },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+    };
+
+    let res = await doFetch();
+
+    // Automatic x402 payment handling: on 402, sign and retry once.
+    if (res.status === 402 && this.x402Signer) {
+      const paymentRequiredHeader = res.headers.get('PAYMENT-REQUIRED');
+      if (paymentRequiredHeader) {
+        const paymentHeaders = await createPaymentHeaders(paymentRequiredHeader, this.x402Signer);
+        if (paymentHeaders) {
+          res = await doFetch(paymentHeaders);
+        }
+      }
+    }
+
     const text = await res.text();
     const json = text ? JSON.parse(text) : undefined;
     if (!res.ok) {

@@ -21,7 +21,10 @@
     "express": "^4.21.1",
     "shamir-secret-sharing": "^0.0.4",
     "uuid": "^10.0.0",
-    "zod": "^3.23.8"
+    "zod": "^3.23.8",
+    "@x402/core": "^2.25.0",
+    "@x402/evm": "^2.25.0",
+    "@x402/express": "^2.25.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.11",

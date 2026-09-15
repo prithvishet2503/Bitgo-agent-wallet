@@ -3,10 +3,12 @@ import { createApp } from './app.js';
 import { seedDemoData } from './store/db.js';
 import { startApprovalTimeoutSweeper } from './scheduler/approvalTimeoutSweeper.js';
 import { startSendQueueWorker } from './scheduler/sendQueueWorker.js';
+import { createX402Middleware } from './services/x402Service.js';
 
 seedDemoData();
 
-const app = createApp();
+const x402Middleware = await createX402Middleware();
+const app = createApp(x402Middleware);
 const port = Number(process.env.PORT ?? 4000);
 
 startApprovalTimeoutSweeper();

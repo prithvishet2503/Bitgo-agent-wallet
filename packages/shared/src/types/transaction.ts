@@ -52,6 +52,10 @@ export const ScreeningReasonSchema = z.enum([
   'KNOWN_MALICIOUS_CONTRACT',
   'MIXER_LINKED',
   'ILLICIT_SOURCE',
+  /** SCREENING_FAIL_MODE=closed: the threat-intel vendor was unreachable, so
+   * the transaction is held (flagged) rather than allowed through unscreened.
+   * Not an assertion about the address - retry once the vendor recovers. */
+  'SCREENING_UNAVAILABLE',
   'NONE',
 ]);
 export type ScreeningReason = z.infer<typeof ScreeningReasonSchema>;

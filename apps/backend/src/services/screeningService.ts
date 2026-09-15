@@ -83,6 +83,16 @@ refreshTimer.unref();
 const GOPLUS_ADDRESS_SECURITY_URL = 'https://api.gopluslabs.io/api/v1/address_security';
 const GOPLUS_TIMEOUT_MS = 3000;
 
+/** Fail-open vs fail-closed when the threat-intel vendor is unreachable
+ * (Section 6.3 / PRD positioning: "deploy without a compliance exception").
+ * `closed` (default): an unreachable vendor holds the transaction
+ * (verdict flagged, reason SCREENING_UNAVAILABLE - retryable once the vendor
+ * recovers; the OFAC feed and curated lists still apply regardless). `open`:
+ * the previous behavior - vendor outage degrades to "this vendor found
+ * nothing". An institution that can tolerate unscreened traffic during an
+ * outage can opt into `open` explicitly. */
+const SCREENING_FAIL_MODE = process.env.SCREENING_FAIL_MODE === 'open' ? 'open' : 'closed';
+
 /** Our own network vocabulary -> GoPlus chain id. GoPlus's threat intel is
  * populated from real-world (mainnet) activity, so an unrecognized/testnet
  * network still checks against Ethereum mainnet reputation (address
@@ -139,15 +149,13 @@ function classifyGoPlusResult(result: GoPlusAddressSecurityResult): ScreeningRea
   return null;
 }
 
-/** Returns a reason if GoPlus flags the address, or `null` if it doesn't (or
- * the lookup itself failed - see the honesty note below). Never throws: a
- * screening-vendor outage degrades to "this vendor found nothing" rather than
- * blocking every transaction, the same fail-open choice already made for the
- * OFAC feed's fallback snapshot. This is a real tradeoff for an institutional
- * product (fail-closed would be more conservative) - documented rather than
- * silently chosen, and mitigated by the OFAC feed and curated demo lists
- * still applying regardless of GoPlus's availability. */
-async function checkGoPlusAddressSecurity(address: string, chainId: string): Promise<ScreeningReason | null> {
+/** Returns a reason if GoPlus flags the address, `null` if it doesn't, or
+ * `'VENDOR_UNAVAILABLE'` when the lookup itself failed. Never throws; the
+ * caller (`screen`) decides fail-open vs fail-closed via SCREENING_FAIL_MODE. */
+async function checkGoPlusAddressSecurity(
+  address: string,
+  chainId: string,
+): Promise<ScreeningReason | null | 'VENDOR_UNAVAILABLE'> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), GOPLUS_TIMEOUT_MS);
   try {
@@ -165,7 +173,7 @@ async function checkGoPlusAddressSecurity(address: string, chainId: string): Pro
     goPlusLastError = err instanceof Error ? err.message : String(err);
     // eslint-disable-next-line no-console
     console.error(`[screeningService] GoPlus lookup failed for ${address} (chain ${chainId}): ${goPlusLastError}`);
-    return null;
+    return 'VENDOR_UNAVAILABLE';
   } finally {
     clearTimeout(timeout);
   }
@@ -184,12 +192,16 @@ export interface ScreeningStatus {
     lastError: string | null;
     source: string;
   };
+  /** 'closed' (default) holds transactions when the threat-intel vendor is
+   * unreachable; 'open' degrades to clean. See SCREENING_FAIL_MODE. */
+  failMode: 'closed' | 'open';
 }
 
 export function getScreeningStatus(): ScreeningStatus {
   return {
     ofac: { count: sanctionedAddresses.size, lastRefreshedAt, lastRefreshError, usingFallback, source: OFAC_ETH_LIST_URL },
     goPlus: { lastCheckedAt: goPlusLastCheckedAt, lastError: goPlusLastError, source: GOPLUS_ADDRESS_SECURITY_URL },
+    failMode: SCREENING_FAIL_MODE,
   };
 }
 
@@ -222,7 +234,16 @@ export async function screen({
   } else {
     const chainId = (network && NETWORK_TO_GOPLUS_CHAIN_ID[network]) || '1';
     const goPlusReason = await checkGoPlusAddressSecurity(normalized, chainId);
-    if (goPlusReason) {
+    if (goPlusReason === 'VENDOR_UNAVAILABLE') {
+      if (SCREENING_FAIL_MODE === 'closed') {
+        // Fail-closed (default): hold the transaction rather than let it
+        // through unscreened. Not an assertion about the address - the agent
+        // can simply resubmit once the vendor recovers.
+        verdict = 'flagged';
+        reason = 'SCREENING_UNAVAILABLE';
+      }
+      // Fail-open: degrade to clean, the historical behavior.
+    } else if (goPlusReason) {
       verdict = 'flagged';
       reason = goPlusReason;
     }

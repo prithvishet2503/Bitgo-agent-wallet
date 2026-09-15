@@ -7,7 +7,7 @@
     "build": "tsc -b",
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
-    "test": "tsx --test src/**/*.test.ts",
+    "test": "find src -name '*.test.ts' | xargs tsx --test",
     "split-key": "tsx scripts/splitKey.ts",
     "generate-mpc-keys": "tsx scripts/generateMpcKeys.ts"
   },

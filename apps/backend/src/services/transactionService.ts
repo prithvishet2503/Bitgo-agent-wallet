@@ -20,7 +20,17 @@ import * as sendQueueService from './sendQueueService.js';
 import * as gasSponsorshipService from './gasSponsorshipService.js';
 import * as auditService from './auditService.js';
 import * as riskService from './riskService.js';
+import { notifyAlert } from '../notifications/channels.js';
 import type { ChainExecutor } from './chainExecutor.js';
+
+/** Section 12.7 - fractions of a pact cap that trigger a budget alert when
+ * projected spend crosses them. Comma-separated env override, e.g.
+ * `BUDGET_ALERT_THRESHOLDS=0.5,0.9`. */
+const BUDGET_ALERT_THRESHOLDS = (process.env.BUDGET_ALERT_THRESHOLDS ?? '0.5,0.8,0.9')
+  .split(',')
+  .map((s) => Number(s.trim()))
+  .filter((n) => Number.isFinite(n) && n > 0 && n <= 1)
+  .sort((a, b) => a - b);
 
 /**
  * Orchestrates the full agent-transaction lifecycle described across Sections
@@ -121,8 +131,12 @@ export async function submitTransaction(request: TransactionRequestInput, acting
     return record;
   }
 
-  // Section 6.3 - pre-execution simulation, before anything else.
-  const simulation = simulationService.simulate(request);
+  // Section 6.3 - pre-execution simulation, before anything else. In real
+  // chain mode this is a genuine eth_call + estimateGas of the exact
+  // AgentSubWallet.execute() call that would be broadcast (see
+  // simulationService.ts / chainExecutor.simulateTransaction); in mock mode it
+  // stays the deterministic placeholder model.
+  const simulation = await simulationService.simulate(request, subWallet);
   record.simulation = simulation;
   auditService.record({
     enterpriseId: subWallet.enterpriseId,
@@ -138,12 +152,25 @@ export async function submitTransaction(request: TransactionRequestInput, acting
     record.decidedAt = nowIso();
     transactionDao.createOrUpdate(record);
 
-    // Section 12.4 - Penalize trust score for failed simulation.
+    auditService.record({
+      enterpriseId: subWallet.enterpriseId,
+      subWalletId: subWallet.id,
+      eventType: 'TRANSACTION_SIMULATION_FAILED',
+      actorUserId: null,
+      actorType: 'system',
+      summary: `Transaction blocked: simulation predicted failure (${simulation.failureReason})`,
+      metadata: { transactionId: record.id, simulation },
+    });
+
+    // Section 12.4 - penalize trust score for a failed simulation. A technical
+    // failure, deliberately NOT counted as a policy violation (that
+    // conflation polluted the compliance counters the risk engine reads).
     riskService.updateTrustScore(subWallet, {
       wasExecuted: false,
-      hadPolicyViolation: true,
+      hadPolicyViolation: false,
       hadScreeningFlag: false,
       hadQuarantineEvent: false,
+      hadSimulationFailure: true,
     });
 
     return record;
@@ -153,6 +180,21 @@ export async function submitTransaction(request: TransactionRequestInput, acting
   const screening = await screeningService.screenOutgoing(request.to, request.contractAddress, request.network);
   record.screening = screening;
   if (screening.verdict === 'flagged') {
+    // Grade the blocked attempt too (Section 12.9 direction): the assessment
+    // is stored on the transaction and audit-logged, so compliance can triage
+    // flagged attempts by severity. This also makes the `critical` tier
+    // reachable - a flagged screening contributing its full factor weight is
+    // the strongest risk signal the engine has, and previously it could never
+    // fire because assessment only ran on transactions that had *passed*
+    // screening (structurally zeroing 25% of the score).
+    const pactForAssessment = pactService.getPactForSubWallet(subWallet.id);
+    record.riskAssessment = riskService.assessTransactionRisk(
+      subWallet,
+      pactForAssessment,
+      request,
+      simulation,
+      screening,
+    );
     record.status = 'screening_blocked';
     record.decidedAt = nowIso();
     transactionDao.createOrUpdate(record);
@@ -171,8 +213,8 @@ export async function submitTransaction(request: TransactionRequestInput, acting
       eventType: 'TRANSACTION_SCREENING_BLOCKED',
       actorUserId: null,
       actorType: 'system',
-      summary: `Transaction hard-blocked by screening: ${screening.reason}`,
-      metadata: { transactionId: record.id, screening },
+      summary: `Transaction hard-blocked by screening: ${screening.reason} (risk ${record.riskAssessment.tier}, score ${record.riskAssessment.overallScore})`,
+      metadata: { transactionId: record.id, screening, riskAssessment: record.riskAssessment },
     });
     return record;
   }
@@ -189,6 +231,43 @@ export async function submitTransaction(request: TransactionRequestInput, acting
   }
   const evaluation = pactService.evaluate(subWallet, pact, request);
   record.policyViolations = evaluation.violations;
+
+  // Section 12.7 - Predictive budget alerts. Fires when *this* submission is
+  // the one carrying projected spend across an alert threshold on a pact cap,
+  // so admins hear the agent is trending toward its cap before the cap starts
+  // escalating transactions to approval. Deterministic threshold math, not a
+  // model - deduplicated by construction (a threshold only "crosses" once per
+  // committed-spend level).
+  for (const projection of pactService.projectSpend(subWallet.id, pact, request.valueUsd)) {
+    if (projection.capUsd <= 0) continue; // degenerate cap; evaluation flags the tx anyway
+    // ALL thresholds this submission crosses fire (a jump from 70% to 95%
+    // alerts at both 80% and 90% - the 90% one is the one that matters).
+    const crossed = BUDGET_ALERT_THRESHOLDS.filter(
+      (t) => projection.committedRatio < t && projection.projectedRatio >= t,
+    );
+    for (const threshold of crossed) {
+      const summary =
+        `Agent "${subWallet.agentName}" projected to ${Math.round(projection.projectedRatio * 100)}% of its ` +
+        `${projection.horizon} spend cap ($${projection.projectedUsd} of $${projection.capUsd} on transaction ${record.id})`;
+      auditService.record({
+        enterpriseId: subWallet.enterpriseId,
+        subWalletId: subWallet.id,
+        eventType: 'BUDGET_THRESHOLD_APPROACHED',
+        actorUserId: null,
+        actorType: 'system',
+        summary,
+        metadata: {
+          transactionId: record.id,
+          horizon: projection.horizon,
+          threshold,
+          committedUsd: projection.committedUsd,
+          projectedUsd: projection.projectedUsd,
+          capUsd: projection.capUsd,
+        },
+      });
+      notifyAlert(`[budget ${Math.round(threshold * 100)}%] ${summary}`);
+    }
+  }
 
   // Section 5.2 / 12.9 - Risk-grading assessment. Produced after screening
   // (which already determined the address isn't blocked) and policy evaluation

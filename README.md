@@ -339,6 +339,36 @@ self-reported success) - see the sections above for how each was checked:
   funded to be able to do so.
 - **Price oracle** - Chainlink Price Feeds (`priceOracle.ts`), read live
   on-chain, not a fixed constant - see "Note on value" above.
+- **Pre-execution simulation (real mode)** - `chainExecutor.simulateTransaction`
+  does a genuine `eth_call` of the exact `execute()` call that would be
+  broadcast (from the owner, so the onlyOwner gate passes) plus
+  `estimateGas`, so predicted reverts are caught *before* anything is signed
+  or queued, and the fee estimate is real gas units x live gas price x live
+  ETH/USD. Mock mode keeps the deterministic placeholder model. See
+  `simulationService.ts`.
+- **Slack delivery** - `notifications/channels.ts` POSTs approval requests
+  and budget alerts to a real Slack webhook when `SLACK_WEBHOOK_URL` is set
+  (console logging always applies; delivery failures never break the
+  governance pipeline). Mobile push remains a log line.
+- **Fail-closed screening** - an unreachable threat-intel vendor *holds* the
+  transaction (flagged, `SCREENING_UNAVAILABLE`, retryable once the vendor
+  recovers) instead of letting it through unscreened. `SCREENING_FAIL_MODE=open`
+  restores the old fail-open behavior explicitly; the OFAC feed applies
+  regardless. Default is `closed` - the institutional reading of the PRD's
+  "deploy without a compliance exception" positioning.
+- **Risk-grading severity floors** - a sanctioned destination floors at
+  `critical`, any other screening flag at `high`, regardless of how benign the
+  weighted score looks; screening-blocked transactions now carry a graded risk
+  assessment in the audit log (previously the assessment only ran on
+  transactions that had *passed* screening, structurally zeroing the heaviest
+  factor and making `critical` unreachable).
+- **Section 12 features that are really v1 infrastructure** - predictive
+  budget alerts (12.7: `BUDGET_THRESHOLD_APPROACHED` when projected spend
+  crosses 50/80/90% of a pact cap), deterministic trust-score graduation
+  eligibility (12.4: `GET /api/v1/risk/:id/graduation-eligibility`, snapshotted
+  into every `AUTONOMY_MODE_CHANGED` audit entry), and template-built
+  plain-language approval summaries (12.3: `approval.summaryText`, derived
+  only from the structured record so an auditor can verify every claim).
 
 Still mocked, and why:
 
@@ -350,12 +380,11 @@ Still mocked, and why:
 - **Full-coverage threat intelligence** - GoPlus's free tier covers a lot
   (see above) but a paid vendor (Blockaid/Chainalysis - PRD Section 11 open
   question) would add deeper transaction-simulation-based drainer/scam
-  detection GoPlus's address-reputation model doesn't attempt. GoPlus lookups
-  also fail open on a vendor outage/timeout (3s) - documented in
-  `screeningService.ts` as a real tradeoff, mitigated by the OFAC feed and
-  curated demo sets still applying regardless.
-- **Notifications** - Slack/mobile-push delivery are `console.log` lines
-  (`apps/backend/src/notifications/channels.ts`).
+  detection GoPlus's address-reputation model doesn't attempt. Vendor
+  outages fail *closed* by default now (see above); what's still missing is
+  simulation-based drainer detection depth, not availability behavior.
+- **Mobile push notifications** - Slack is a real webhook (see above); mobile
+  push remains a structured log line standing in for a push provider.
 - **RBAC depth** - one role per user (`packages/shared/src/types/permissions.ts`
   maps role → permission strings) rather than BitGo's full per-enterprise
   Role/Permission/Resource join-table system.
@@ -363,3 +392,37 @@ Still mocked, and why:
 Swapping any of the still-mocked ones for the real thing touches only the
 file(s) named above - no other service's governance logic needs to change, by
 design (DAO layer + narrow ChainExecutor/KeySource/SendQueue interfaces).
+
+## Trust boundary reality (read before production)
+
+An honest statement the code comments also make, but deserves top billing:
+**every `AgentSubWallet` on-chain is owned by the same single backend signer**
+(the `KeySource` key). All Pacts, caps, autonomy modes, risk tiers, and the
+kill switch are enforced **off-chain in this backend**, before anything is
+signed - nothing on-chain bounds a compromised backend. The MPC custody
+protects that one key, but its blast radius is every sub-wallet
+simultaneously. A real BitGo Agent Wallet enforces policy on-chain (PRD
+Section 10.1: audited ERC-7579 modular accounts with an ERC-7710 delegation
+manager - the Pact type here is explicitly "the backend/off-chain mirror" of
+that grant). Until that exists, this prototype's correct deployment story is
+"demo/testnet governance surface", not "institutional isolation". Likewise,
+incoming-transaction screening reacts to transactions submitted to an
+explicit endpoint; there is no chain watcher yet.
+
+## Tests
+
+```bash
+cd apps/backend
+npm test
+```
+
+50 tests cover the governance surface end-to-end: pact cap math (including
+the approved+executed committed-spend rule that prevents queue races),
+allow/denylists, session expiry, risk-tier boundaries and severity floors,
+trust-score accounting (simulation failures counted separately from policy
+violations), the approval flow (role gating, $25k multi-approver threshold,
+single-deny, deny-on-timeout), the full submission pipeline (auto-execute,
+escalation, screening blocks, kill switch, no-pact), budget-alert threshold
+crossing and dedup, and both screening fail modes. Fully hermetic: every
+network fetch is mocked and storage is in-memory. CI runs build + tests on
+Node 20/22/24 (`.github/workflows/ci.yml`).

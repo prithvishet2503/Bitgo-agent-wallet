@@ -18,6 +18,7 @@ import * as auditService from './auditService.js';
 import * as enterpriseService from './enterpriseService.js';
 import * as sendQueueService from './sendQueueService.js';
 import type { ChainExecutor } from './chainExecutor.js';
+import * as riskService from './riskService.js';
 
 /** Section 6.1 - Agent Sub-Wallet Creation.
  * Creating a sub-wallet does not deploy its on-chain smart account inline - it
@@ -71,15 +72,7 @@ export function createSubWallet(input: CreateAgentSubWalletInput, actingUser: Us
     eip7702Delegated: false,
     pactId: null,
     // Section 12.4 - Initial trust score: perfect score for a new sub-wallet.
-    trustScore: {
-      score: 100,
-      lastUpdated: nowIso(),
-      totalTransactions: 0,
-      cleanAutoExecutes: 0,
-      policyViolations: 0,
-      screeningFlags: 0,
-      quarantineEvents: 0,
-    },
+    trustScore: riskService.defaultTrustScore(),
     createdByUserId: actingUser.id,
     createdAt: nowIso(),
     suspendedAt: null,
@@ -213,7 +206,14 @@ export function setAutonomyMode(id: string, mode: AutonomyMode, actingUser: User
     actorUserId: actingUser.id,
     actorType: 'user',
     summary: `Autonomy mode changed from ${previous} to ${mode} by ${actingUser.name}`,
-    metadata: { previousMode: previous, newMode: mode },
+    // Section 12.4 - snapshot the deterministic graduation checklist at the
+    // moment of the change, so the audit log answers "was this agent actually
+    // eligible when it was given more autonomy?" without reconstructing state.
+    metadata: {
+      previousMode: previous,
+      newMode: mode,
+      graduationEligibility: riskService.evaluateGraduationEligibility(updated),
+    },
   });
   return updated;
 }

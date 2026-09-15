@@ -16,7 +16,8 @@ export const AuditEventTypeSchema = z.enum([
   'AUTONOMY_MODE_CHANGED',
   'TRANSACTION_SUBMITTED',
   'TRANSACTION_SIMULATED',
-  'TRANSACTION_SCREENING_BLOCKED',
+  'TRANSACTION_SIMULATION_FAILED', // Section 6.3 - pre-execution simulation predicted a revert
+  'TRANSACTION_SCREENING_BLOCKED', // Section 6.3 - screening hard block
   'TRANSACTION_POLICY_DENIED',
   'TRANSACTION_QUEUED_FOR_BROADCAST', // built, signed-and-queued via SendQueue (auto or post-approval)
   'APPROVAL_REQUESTED',
@@ -32,6 +33,7 @@ export const AuditEventTypeSchema = z.enum([
   'GAS_SPONSORSHIP_CAP_EXCEEDED',
   'RISK_ASSESSED',
   'TRUST_SCORE_CHANGED',
+  'BUDGET_THRESHOLD_APPROACHED', // Section 12.7 - projected spend crossed an alert threshold on a pact cap
 ]);
 export type AuditEventType = z.infer<typeof AuditEventTypeSchema>;
 

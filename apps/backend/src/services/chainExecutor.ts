@@ -70,9 +70,33 @@ export interface ChainExecutor {
     valueUsd: number;
     transactionId: string;
   }): Promise<ExecuteTransactionResult>;
+  /** Section 6.3 - pre-execution simulation of the exact call
+   * `executeTransaction` would broadcast. Optional: mock mode doesn't
+   * implement it (the deterministic placeholder model in simulationService
+   * stands in); real mode does a genuine `eth_call` (from the owner, against
+   * the sub-wallet's `execute()`) plus `estimateGas`, so a revert is caught
+   * before anything is signed, and the estimated fee is real gas units at the
+   * live gas price, not a formula. */
+  simulateTransaction?(input: {
+    subWalletAddress: string;
+    to: string;
+    valueUsd: number;
+  }): Promise<SimulateTransactionResult>;
   /** Live, on-demand status (treasury balance, current price) - not cached
    * request state, a fresh check every call. Used by GET /api/v1/chain/status. */
   getStatus(): Promise<ChainExecutorStatus>;
+}
+
+export interface SimulateTransactionResult {
+  willSucceed: boolean;
+  failureReason: string | null;
+  /** Real gas units from estimateGas, when the call succeeded. */
+  gasUnits: bigint | null;
+  /** Real gas price (wei) used for the fee estimate. */
+  gasPriceWei: bigint | null;
+  /** Real gas units x live gas price x live ETH/USD, when both were
+   * available; null means the caller should fall back to its fee model. */
+  estimatedFeeUsd: number | null;
 }
 
 export class MockChainExecutor implements ChainExecutor {
@@ -229,6 +253,78 @@ export class RealChainExecutor implements ChainExecutor {
       const receipt = await tx.wait();
       return { txHash: receipt.hash, valueWei: valueWei.toString() };
     });
+  }
+
+  async simulateTransaction({
+    subWalletAddress,
+    to,
+    valueUsd,
+  }: {
+    subWalletAddress: string;
+    to: string;
+    valueUsd: number;
+  }): Promise<SimulateTransactionResult> {
+    if (!ethers.isAddress(to)) {
+      return {
+        willSucceed: false,
+        failureReason: `"${to}" is not a valid on-chain address`,
+        gasUnits: null,
+        gasPriceWei: null,
+        estimatedFeeUsd: null,
+      };
+    }
+    const valueWei = await usdToWei(valueUsd, this.provider);
+    const iface = new ethers.Interface(AGENT_SUB_WALLET_ABI);
+    const data = iface.encodeFunctionData('execute', [to, valueWei, '0x']);
+    // `execute()` is owner-gated, so the eth_call must run *from the owner*
+    // (the backend signer) or the onlyOwner check reverts for the wrong
+    // reason. Read-only: no state changes, no gas, nothing signed.
+    const from = this.keySource.signerAddress;
+    try {
+      await this.provider.call({ from, to: subWalletAddress, data });
+    } catch (err) {
+      // ethers v6 attaches a human-readable `shortMessage` to call errors;
+      // narrow for it rather than casting.
+      const hasShortMessage =
+        typeof err === 'object' && err !== null && 'shortMessage' in err && typeof err.shortMessage === 'string';
+      const reason = hasShortMessage
+        ? err.shortMessage
+        : err instanceof Error
+          ? err.message
+          : String(err);
+      return {
+        willSucceed: false,
+        failureReason: `Simulated execution reverted: ${reason}`.slice(0, 240),
+        gasUnits: null,
+        gasPriceWei: null,
+        estimatedFeeUsd: null,
+      };
+    }
+    let gasUnits: bigint | null = null;
+    try {
+      gasUnits = await this.provider.estimateGas({ from, to: subWalletAddress, data });
+    } catch {
+      // eth_call succeeded but estimateGas failed (some RPCs are stricter) -
+      // treat as successful with unknown fee rather than blocking.
+    }
+    let gasPriceWei: bigint | null = null;
+    try {
+      const feeData = await this.provider.getFeeData();
+      gasPriceWei = feeData.gasPrice ?? null;
+    } catch {
+      // same tolerance as gasUnits
+    }
+    let estimatedFeeUsd: number | null = null;
+    if (gasUnits !== null && gasPriceWei !== null) {
+      try {
+        const ethUsdPrice = await priceOracle.getEthUsdPrice(this.provider, CHAINLINK_ETH_USD_FEED);
+        const feeEth = Number(ethers.formatEther(gasUnits * gasPriceWei));
+        estimatedFeeUsd = Number((feeEth * ethUsdPrice).toFixed(2));
+      } catch {
+        // price oracle hiccup shouldn't block a call eth_call cleared
+      }
+    }
+    return { willSucceed: true, failureReason: null, gasUnits, gasPriceWei, estimatedFeeUsd };
   }
 
   async getStatus(): Promise<ChainExecutorStatus> {

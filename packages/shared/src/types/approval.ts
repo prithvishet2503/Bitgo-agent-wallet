@@ -43,6 +43,11 @@ export const ApprovalRequestSchema = z.object({
   denials: z.array(z.object({ userId: z.string(), decidedAt: z.string(), reason: z.string().nullable() })).default([]),
   channelsNotified: z.array(ApprovalChannelSchema),
   typedPayload: TypedApprovalPayloadSchema,
+  /** Section 12.3 (deterministic subset) - plain-language summary generated
+   * from the structured record (violations, risk tier, fee, approver count,
+   * timeout). Template-built, not LLM-generated, so an auditor can verify the
+   * summary against the fields it was derived from. */
+  summaryText: z.string().default(''),
   createdAt: z.string(),
   timeoutAt: z.string(),
   defaultAction: ApprovalDefaultActionSchema,

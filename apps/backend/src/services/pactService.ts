@@ -96,6 +96,42 @@ function committedSpendSince(subWalletId: string, sinceMs: number): number {
     .reduce((sum, t) => sum + t.request.valueUsd, 0);
 }
 
+/** Section 12.7 - projected spend for budget alerts. Computes, per horizon
+ * (daily/weekly), what the committed spend plus a candidate transaction
+ * would total against the pact cap. Pure read-side math over the same
+ * `committedSpendSince` the policy engine uses, so alerts can never disagree
+ * with enforcement. */
+export interface SpendProjection {
+  horizon: 'daily' | 'weekly';
+  committedUsd: number;
+  projectedUsd: number;
+  capUsd: number;
+  /** committed / cap (0 when cap is unset/degenerate). */
+  committedRatio: number;
+  /** (committed + candidate) / cap (0 when cap is unset/degenerate). */
+  projectedRatio: number;
+}
+
+export function projectSpend(subWalletId: string, pact: Pact, candidateValueUsd: number): SpendProjection[] {
+  const horizons = [
+    { horizon: 'daily' as const, cap: pact.dailySpendCapUsd, sinceMs: DAY_MS },
+    { horizon: 'weekly' as const, cap: pact.weeklySpendCapUsd, sinceMs: WEEK_MS },
+  ];
+  return horizons.map(({ horizon, cap, sinceMs }) => {
+    const committedUsd = committedSpendSince(subWalletId, Date.now() - sinceMs);
+    const projectedUsd = committedUsd + candidateValueUsd;
+    const safeCap = cap > 0 ? cap : 0;
+    return {
+      horizon,
+      committedUsd,
+      projectedUsd,
+      capUsd: cap,
+      committedRatio: safeCap > 0 ? committedUsd / safeCap : 0,
+      projectedRatio: safeCap > 0 ? projectedUsd / safeCap : 0,
+    };
+  });
+}
+
 /** Evaluates a transaction request against a sub-wallet's Pact. Returns every
  * violation found (not just the first) so the structured denial reason returned to
  * the agent is complete enough to retry within scope in one round trip

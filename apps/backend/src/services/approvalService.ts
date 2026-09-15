@@ -59,10 +59,46 @@ export function createApprovalRequest(
     timeoutAt: new Date(Date.now() + DEFAULT_APPROVAL_TIMEOUT_MS).toISOString(),
     defaultAction: DEFAULT_APPROVAL_DEFAULT_ACTION,
     resolvedAt: null,
+    summaryText: buildSummaryText(transaction, subWallet.agentName, requiredApprovals, DEFAULT_APPROVAL_TIMEOUT_MS, DEFAULT_APPROVAL_DEFAULT_ACTION),
   };
   approvalDao.createOrUpdate(approval);
   notify(approval.channelsNotified, approval, subWallet.agentName);
   return approval;
+}
+
+/** Section 12.3 (deterministic subset) - plain-language approval summary,
+ * template-built from the structured record (violations, risk tier, fee,
+ * approver count, timeout, default action) so an auditor can verify every
+ * claim against the fields it was derived from. No model output. */
+function buildSummaryText(
+  transaction: TransactionRecord,
+  agentName: string,
+  requiredApprovals: number,
+  timeoutMs: number,
+  defaultAction: 'approve' | 'deny',
+): string {
+  const req = transaction.request;
+  const parts: string[] = [
+    `Agent "${agentName}" requests to ${req.functionDescription} $${req.valueUsd} to ${req.to} on ${req.network}.`,
+  ];
+  if (transaction.policyViolations.length > 0) {
+    parts.push(
+      `Policy: ${transaction.policyViolations.length} violation(s): ${transaction.policyViolations.map((v) => v.code).join(', ')}.`,
+    );
+  } else {
+    parts.push('Policy: within all pact limits.');
+  }
+  if (transaction.riskAssessment) {
+    parts.push(`Risk: ${transaction.riskAssessment.tier} (${transaction.riskAssessment.overallScore}/100).`);
+  }
+  if (transaction.simulation) {
+    parts.push(`Estimated fee: $${transaction.simulation.estimatedFeeUsd}.`);
+  }
+  parts.push(
+    `Requires ${requiredApprovals} approval${requiredApprovals > 1 ? 's' : ''}; ` +
+      `auto-${defaultAction}s in ${Math.round(timeoutMs / 60000)} minutes if undecided.`,
+  );
+  return parts.join(' ');
 }
 
 export function getApprovalRequest(id: string): ApprovalRequest {

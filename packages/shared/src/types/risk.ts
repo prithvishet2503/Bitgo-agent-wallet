@@ -41,8 +41,14 @@ export const TrustScoreSchema = z.object({
   policyViolations: z.number().int().nonnegative().default(0),
   screeningFlags: z.number().int().nonnegative().default(0),
   quarantineEvents: z.number().int().nonnegative().default(0),
+  /** Pre-execution simulation failures (Section 6.3). Tracked separately from
+   * policy violations: a reverted simulation is a technical failure (bad
+   * calldata/destination), not a policy breach - conflating the two polluted
+   * the compliance counters the risk engine reads. */
+  simulationFailures: z.number().int().nonnegative().default(0),
 });
 export type TrustScore = z.infer<typeof TrustScoreSchema>;
+
 
 /** Summary response for the risk dashboard endpoint. */
 export const SubWalletRiskSummarySchema = z.object({
@@ -51,6 +57,29 @@ export const SubWalletRiskSummarySchema = z.object({
   recentAssessments: z.array(RiskAssessmentSchema).max(20).default([]),
 });
 export type SubWalletRiskSummary = z.infer<typeof SubWalletRiskSummarySchema>;
+
+/** Section 12.4 - Adaptive Autonomy (graduation consumer).
+ * A Strict-Mode agent with a sustained clean record becomes *eligible* for
+ * graduation to Bounded Auto. Eligibility is a deterministic, auditable
+ * checklist computed from the trust score counters - the actual mode change
+ * remains a human-approved action (setAutonomyMode, admin/compliance only),
+ * which records the eligibility snapshot in its audit entry. */
+export const GraduationCriterionSchema = z.object({
+  key: z.string(),
+  label: z.string(),
+  met: z.boolean(),
+  current: z.number(),
+  required: z.string(),
+});
+export type GraduationCriterion = z.infer<typeof GraduationCriterionSchema>;
+
+export const GraduationEligibilitySchema = z.object({
+  subWalletId: z.string(),
+  eligible: z.boolean(),
+  criteria: z.array(GraduationCriterionSchema),
+  evaluatedAt: z.string(),
+});
+export type GraduationEligibility = z.infer<typeof GraduationEligibilitySchema>;
 
 /** Mapping from numeric score to tier label. */
 export function scoreToTier(score: number): RiskTier {

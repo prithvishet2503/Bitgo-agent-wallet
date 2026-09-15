@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import {
   type AgentSubWallet,
+  type GraduationCriterion,
+  type GraduationEligibility,
   type Pact,
   type RiskAssessment,
   type RiskFactor,
@@ -49,9 +51,19 @@ const TRUST_SCORE_MAX = 100;
 const TRUST_PENALTY_POLICY_VIOLATION = 2;
 const TRUST_PENALTY_SCREENING_FLAG = 5;
 const TRUST_PENALTY_QUARANTINE = 10;
+const TRUST_PENALTY_SIMULATION_FAILURE = 2;
 const TRUST_BONUS_CLEAN_EXECUTE = 1;
-
 const VELOCITY_WINDOW_MS = 24 * 60 * 60 * 1000; // 24h lookback for velocity check
+
+// --- Section 12.4 - graduation eligibility criteria (deterministic checklist) ---
+
+const GRADUATION_MIN_TRUST_SCORE = 90;
+const GRADUATION_MIN_TOTAL_TRANSACTIONS = 20;
+const GRADUATION_MAX_POLICY_VIOLATIONS = 2;
+/** A graduation path exists only from Strict Mode - an agent already in
+ * Bounded Auto cannot "graduate" anywhere, and a suspended agent is not a
+ * candidate for more autonomy (Section 6.6 takes precedence over 12.4). */
+const GRADUATION_FROM_MODE = 'strict';
 
 // --- Public API ---
 
@@ -91,7 +103,21 @@ export function assessTransactionRisk(
   const overallScore = Math.round(
     factors.reduce((sum, f) => sum + f.score * f.weight, 0),
   );
-  const tier = scoreToTier(overallScore);
+  // Severity floors (Section 12.9 - grade by severity, not just aggregate
+  // score): an active sanctions hit is never graded below critical, and any
+  // other screening flag never below high - no matter how benign the value,
+  // history, and velocity factors make the weighted sum look. Without the
+  // floor a sanctioned-destination transaction could grade "medium" (the
+  // screening factor is only 25% of the score), which reads as a severity
+  // statement no compliance officer would accept.
+  let tier = scoreToTier(overallScore);
+  if (screening.verdict === 'flagged') {
+    if (screening.reason === 'SANCTIONED_ADDRESS') {
+      tier = 'critical';
+    } else if (tier === 'low' || tier === 'medium') {
+      tier = 'high';
+    }
+  }
 
   const assessment: RiskAssessment = {
     overallScore,
@@ -115,8 +141,8 @@ export function assessTransactionRisk(
 
 /**
  * Updates the rolling trust score after a transaction reaches a terminal state
- * (executed / denied / screening_blocked / policy_denied). Called by the
- * transaction pipeline when the outcome is known.
+ * (executed / denied / screening_blocked / policy_denied / simulation_failed).
+ * Called by the transaction pipeline when the outcome is known.
  */
 export function updateTrustScore(
   subWallet: AgentSubWallet,
@@ -125,13 +151,19 @@ export function updateTrustScore(
     hadPolicyViolation: boolean;
     hadScreeningFlag: boolean;
     hadQuarantineEvent: boolean;
+    /** Section 6.3 - the pre-execution simulation predicted a revert. A
+     * technical failure, deliberately NOT counted as a policy violation. */
+    hadSimulationFailure?: boolean;
   },
 ): TrustScore {
   const ts = { ...subWallet.trustScore };
   ts.totalTransactions += 1;
   ts.lastUpdated = nowIso();
+  // Guard for records persisted before `simulationFailures` existed.
+  ts.simulationFailures = ts.simulationFailures ?? 0;
+  const hadSimulationFailure = outcome.hadSimulationFailure ?? false;
 
-  if (outcome.wasExecuted && !outcome.hadPolicyViolation && !outcome.hadScreeningFlag) {
+  if (outcome.wasExecuted && !outcome.hadPolicyViolation && !outcome.hadScreeningFlag && !hadSimulationFailure) {
     ts.cleanAutoExecutes += 1;
     ts.score = Math.min(TRUST_SCORE_MAX, ts.score + TRUST_BONUS_CLEAN_EXECUTE);
   }
@@ -147,9 +179,14 @@ export function updateTrustScore(
     ts.quarantineEvents += 1;
     ts.score = Math.max(TRUST_SCORE_MIN, ts.score - TRUST_PENALTY_QUARANTINE);
   }
+  if (hadSimulationFailure) {
+    ts.simulationFailures += 1;
+    ts.score = Math.max(TRUST_SCORE_MIN, ts.score - TRUST_PENALTY_SIMULATION_FAILURE);
+  }
 
   // Persist the updated trust score on the sub-wallet
   subWalletDao.createOrUpdate({ ...subWallet, trustScore: ts });
+
 
   auditService.record({
     enterpriseId: subWallet.enterpriseId,
@@ -187,6 +224,73 @@ export function getRiskSummary(subWalletId: string): SubWalletRiskSummary {
     subWalletId,
     trustScore: subWallet.trustScore,
     recentAssessments: recentTxs.map((tx) => tx.riskAssessment!),
+  };
+}
+
+/**
+ * Section 12.4 - Adaptive Autonomy, eligibility side. A deterministic
+ * checklist over the trust-score counters; the mode change itself stays a
+ * human-approved admin/compliance action (`subWalletService.setAutonomyMode`),
+ * which snapshots this evaluation into its AUTONOMY_MODE_CHANGED audit entry.
+ * Never auto-graduates: eligibility only *proposes*.
+ */
+export function evaluateGraduationEligibility(subWallet: AgentSubWallet): GraduationEligibility {
+  const ts = { ...subWallet.trustScore, simulationFailures: subWallet.trustScore.simulationFailures ?? 0 };
+  const criteria: GraduationCriterion[] = [
+    {
+      key: 'trust_score',
+      label: 'Trust score',
+      met: ts.score >= GRADUATION_MIN_TRUST_SCORE,
+      current: ts.score,
+      required: `>= ${GRADUATION_MIN_TRUST_SCORE}`,
+    },
+    {
+      key: 'total_transactions',
+      label: 'Transactions attempted',
+      met: ts.totalTransactions >= GRADUATION_MIN_TOTAL_TRANSACTIONS,
+      current: ts.totalTransactions,
+      required: `>= ${GRADUATION_MIN_TOTAL_TRANSACTIONS}`,
+    },
+    {
+      key: 'policy_violations',
+      label: 'Policy violations',
+      met: ts.policyViolations <= GRADUATION_MAX_POLICY_VIOLATIONS,
+      current: ts.policyViolations,
+      required: `<= ${GRADUATION_MAX_POLICY_VIOLATIONS}`,
+    },
+    {
+      key: 'screening_flags',
+      label: 'Screening flags',
+      met: ts.screeningFlags === 0,
+      current: ts.screeningFlags,
+      required: '= 0',
+    },
+    {
+      key: 'quarantine_events',
+      label: 'Quarantine events',
+      met: ts.quarantineEvents === 0,
+      current: ts.quarantineEvents,
+      required: '= 0',
+    },
+  ];
+
+  const modeEligible =
+    subWallet.autonomyMode === GRADUATION_FROM_MODE && subWallet.status === 'active';
+
+  return {
+    subWalletId: subWallet.id,
+    eligible: modeEligible && criteria.every((c) => c.met),
+    criteria: [
+      ...criteria,
+      {
+        key: 'current_mode',
+        label: 'Current autonomy mode',
+        met: modeEligible,
+        current: subWallet.autonomyMode === 'strict' ? 0 : 1,
+        required: 'strict + active',
+      },
+    ],
+    evaluatedAt: nowIso(),
   };
 }
 
@@ -320,5 +424,6 @@ export function defaultTrustScore(): TrustScore {
     policyViolations: 0,
     screeningFlags: 0,
     quarantineEvents: 0,
+    simulationFailures: 0,
   };
 }

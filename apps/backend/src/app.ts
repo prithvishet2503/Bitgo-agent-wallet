@@ -1,5 +1,5 @@
 import cors from 'cors';
-import express, { type Express } from 'express';
+import express, { type Express, type RequestHandler } from 'express';
 import { authRouter } from './routes/auth.js';
 import { organizationsRouter } from './routes/organizations.js';
 import { enterprisesRouter } from './routes/enterprises.js';
@@ -19,8 +19,11 @@ import { errorHandler } from './middleware/errorHandler.js';
  * BitGo Agent Wallet API - a REST surface over the Section 6 functional
  * requirements. The SDK, CLI, and MCP server (Section 6.7) are all thin clients of
  * this same API, so there is exactly one implementation of the governance logic.
+ *
+ * @param x402Middleware - Optional x402 payment middleware. When provided, write
+ *   endpoints require x402 payment; when omitted all routes are free.
  */
-export function createApp(): Express {
+export function createApp(x402Middleware?: RequestHandler | null): Express {
   const app = express();
   app.use(cors());
   app.use(express.json());
@@ -36,6 +39,12 @@ export function createApp(): Express {
   app.use('/api/v1/enterprises', enterprisesRouter);
   app.use('/api/v1/screening', screeningRouter);
   app.use('/api/v1/chain', chainRouter);
+
+  // x402 payment check: protects write endpoints after auth, before enterprise
+  // resolution. Only added when configured (real chain mode with signing key).
+  if (x402Middleware) {
+    app.use('/api/v1', x402Middleware);
+  }
 
   // ...and everything below also resolves which Enterprise the request acts on
   // (Section: Organization -> Enterprise hierarchy; X-Enterprise-Id header).

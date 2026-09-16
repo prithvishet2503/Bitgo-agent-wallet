@@ -34,7 +34,9 @@ apps/mcp-server      MCP server (Section 6.7) - lets agent frameworks call the w
 `packages/contracts` has a minimal `AgentSubWalletFactory` + `AgentSubWallet`
 pair (prototype/demo, not audited - see that package's README) deployed live to
 Ethereum Sepolia: factory at
-[`0x97FCa4F8B07C7645552925860673943C086C6189`](https://sepolia.etherscan.io/address/0x97FCa4F8B07C7645552925860673943C086C6189).
+[`0x1BB2A18BA48204B600D5122395e2CBa7B46A0A9a`](https://sepolia.etherscan.io/address/0x1BB2A18BA48204B600D5122395e2CBa7B46A0A9a)
+(see `packages/contracts/README.md` for why this changed from the earlier
+factory address - `AgentSubWallet.sol` gained a real gas-refund mechanism).
 
 The backend can drive this factory for real. `apps/backend/src/services/chainExecutor.ts`
 has two implementations of a `ChainExecutor` interface:
@@ -362,6 +364,15 @@ self-reported success) - see the sections above for how each was checked:
   assessment in the audit log (previously the assessment only ran on
   transactions that had *passed* screening, structurally zeroing the heaviest
   factor and making `critical` unreachable).
+- **Gas sponsorship (Section 6.10)** - who pays gas is now a real on-chain
+  distinction, not just an off-chain ledger entry. The backend's treasury
+  signer broadcasts every transaction either way, but sponsored transactions
+  call plain `execute()` (treasury eats the cost) while fallback transactions
+  call `AgentSubWallet.executeWithGasRefund()`, which reimburses the treasury
+  from the sub-wallet's *own* ETH balance - a real transfer, read back from
+  the on-chain `GasRefunded` event and recorded in the audit log, not
+  computed off-chain. See `packages/contracts/README.md`'s "Gas sponsorship"
+  section for the approximation this makes and why.
 - **Section 12 features that are really v1 infrastructure** - predictive
   budget alerts (12.7: `BUDGET_THRESHOLD_APPROACHED` when projected spend
   crosses 50/80/90% of a pact cap), deterministic trust-score graduation

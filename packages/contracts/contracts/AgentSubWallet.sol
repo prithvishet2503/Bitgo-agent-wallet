@@ -26,6 +26,7 @@ contract AgentSubWallet {
 
     event Executed(address indexed to, uint256 value, bytes data, bytes result);
     event OwnerChanged(address indexed previousOwner, address indexed newOwner);
+    event GasRefunded(address indexed to, uint256 amount);
 
     modifier onlyOwner() {
         require(msg.sender == owner, "AgentSubWallet: not owner");
@@ -49,6 +50,50 @@ contract AgentSubWallet {
         (bool success, bytes memory result) = to.call{value: value}(data);
         require(success, "AgentSubWallet: call reverted");
         emit Executed(to, value, data, result);
+        return result;
+    }
+
+    /// @notice Same as `execute()`, but reimburses `owner` (the backend's
+    /// treasury signer, which pays every transaction's gas up front out of
+    /// its own balance regardless of which function is called - see
+    /// apps/backend/src/services/chainExecutor.ts) for this call's gas cost,
+    /// pulled from this wallet's own ETH balance.
+    ///
+    /// This is the actual on-chain mechanism behind "gas sponsorship
+    /// fallback: own_balance" (Section 6.10 / gasSponsorshipService.ts): when
+    /// a Pact's sponsorship cap is exceeded, the backend calls this instead
+    /// of `execute()`, so the agent's *own* sub-wallet - not the shared
+    /// treasury - ends up paying for its gas. When a transaction is
+    /// genuinely sponsored, the backend calls plain `execute()` instead and
+    /// the treasury simply eats the cost with no refund.
+    ///
+    /// The refund is a real ETH transfer, not off-chain bookkeeping - but it
+    /// is necessarily an *approximation* of the true transaction cost, a
+    /// known limitation of on-chain gas-refund patterns (the same one GSN v1's
+    /// `postRelayedCall` has): `gasleft()` is sampled after this function's
+    /// own execution has already begun, so the refund misses the flat 21000
+    /// base transaction cost, the calldata's own gas cost, and the gas the
+    /// refund transfer itself consumes. Documented here rather than
+    /// papered over; it under-refunds the treasury slightly rather than
+    /// over-charging the sub-wallet. Never reverts the whole call just
+    /// because the refund can't be paid in full - a sub-wallet too low on
+    /// ETH to fully reimburse gas still gets its `execute()` call through;
+    /// it simply refunds what it can (see `GasRefunded`).
+    function executeWithGasRefund(address to, uint256 value, bytes calldata data) external onlyOwner returns (bytes memory) {
+        uint256 gasStart = gasleft();
+        (bool success, bytes memory result) = to.call{value: value}(data);
+        require(success, "AgentSubWallet: call reverted");
+        emit Executed(to, value, data, result);
+
+        uint256 gasUsed = gasStart - gasleft();
+        uint256 owed = gasUsed * tx.gasprice;
+        uint256 refund = owed < address(this).balance ? owed : address(this).balance;
+        if (refund > 0) {
+            (bool refunded, ) = payable(owner).call{value: refund}("");
+            if (refunded) {
+                emit GasRefunded(owner, refund);
+            }
+        }
         return result;
     }
 

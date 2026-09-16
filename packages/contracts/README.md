@@ -6,7 +6,8 @@ Agent Wallet would adopt an audited implementation (Safe/Biconomy/ZeroDev-style)
 per the PRD's own note (Section 6.10) that BitGo should not ship a custom
 unaudited delegator.
 
-- `AgentSubWallet.sol` - minimal owner-gated wallet (`execute()`, EIP-1271 stub).
+- `AgentSubWallet.sol` - minimal owner-gated wallet (`execute()`, EIP-1271 stub,
+  and `executeWithGasRefund()` - see "Gas sponsorship" below).
 - `AgentSubWalletFactory.sol` - CREATE2 factory, one call deploys + initializes a
   wallet. Mirrors wallet-platform's `AbstractEthLikeWalletDeployer` pattern.
 
@@ -50,10 +51,45 @@ npm run smoke-test:sepolia        # predicts an address, deploys through the
                                    # execute()
 ```
 
+## Gas sponsorship: who actually pays, on-chain
+
+The backend's treasury signer broadcasts *every* transaction (it's the only
+address any sub-wallet recognizes as its `owner`), but which contract function
+it calls decides who ends up paying for the gas (Section 6.10;
+`apps/backend/src/services/gasSponsorshipService.ts` makes the decision,
+`chainExecutor.ts` acts on it):
+
+- **Sponsored** - plain `execute()`. The treasury pays gas out of pocket and
+  is never reimbursed - genuinely gas-free for the agent/sub-wallet.
+- **Not sponsored** (a Pact's sponsorship cap was exceeded, fallback =
+  `own_balance`) - `executeWithGasRefund()` instead. Same call, but the
+  sub-wallet's own ETH balance reimburses the treasury for (an approximation
+  of) this call's gas cost, via a real transfer emitted as `GasRefunded`.
+
+The refund is necessarily approximate - a known limitation of on-chain
+gas-refund patterns (the same one GSN v1's `postRelayedCall` has): sampling
+`gasleft()` from inside the function under-counts the flat 21000 base
+transaction cost, the calldata's own gas, and the refund transfer's own gas.
+Documented in the contract rather than hidden; it under-refunds rather than
+over-charging the sub-wallet, and never blocks the underlying `execute()` call
+if the sub-wallet can't cover the refund in full.
+
+Verified against Sepolia (`npm run smoke-test-gas-refund:sepolia`,
+`scripts/smokeTestGasRefund.ts`): funded a fresh sub-wallet, called
+`executeWithGasRefund`, and independently confirmed via separate balance
+reads (not just the event log) that the sub-wallet's balance dropped by
+exactly the refunded amount and the owner's balance changed by exactly
+`refund - its own tx gas cost`.
+
 ## Deployed instance (Sepolia)
 
-- **AgentSubWalletFactory**: [`0x97FCa4F8B07C7645552925860673943C086C6189`](https://sepolia.etherscan.io/address/0x97FCa4F8B07C7645552925860673943C086C6189)
-  ([deploy tx](https://sepolia.etherscan.io/tx/0xe07ccbb70013b2e1f8bdb035945e44632915967641c2bfd1048bbcecb723cd9e))
+- **AgentSubWalletFactory**: [`0x1BB2A18BA48204B600D5122395e2CBa7B46A0A9a`](https://sepolia.etherscan.io/address/0x1BB2A18BA48204B600D5122395e2CBa7B46A0A9a)
+  ([deploy tx](https://sepolia.etherscan.io/tx/0xa6ddfbe70ea1c0fa4a46eccf09d4d54ee01598e4531759e0f111e4d09b3c6b63))
+  - redeployed to add `executeWithGasRefund` / `GasRefunded` to
+    `AgentSubWallet` (its bytecode is embedded in the factory's `CREATE2`
+    creation code, so a contract change means a new factory address). The
+    prior factory (`0x97FCa4F8B07C7645552925860673943C086C6189`) still exists
+    on-chain but is no longer referenced by the backend.
 - Verified end-to-end via `smoke-test:sepolia`: CREATE2 address prediction
   matched the actual deployment exactly, and the owner-gated `execute()` call
   succeeded on-chain.

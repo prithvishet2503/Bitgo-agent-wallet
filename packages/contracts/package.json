@@ -10,7 +10,8 @@
     "generate-wallet": "hardhat run scripts/generateWallet.ts",
     "check-balance": "hardhat run scripts/checkBalance.ts --network sepolia",
     "check-balance:baseSepolia": "hardhat run scripts/checkBalance.ts --network baseSepolia",
-    "smoke-test:sepolia": "hardhat run scripts/smokeTestFactory.ts --network sepolia"
+    "smoke-test:sepolia": "hardhat run scripts/smokeTestFactory.ts --network sepolia",
+    "smoke-test-gas-refund:sepolia": "hardhat run scripts/smokeTestGasRefund.ts --network sepolia"
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-toolbox": "^5.0.0",

@@ -31,6 +31,7 @@ export const AuditEventTypeSchema = z.enum([
   'QUARANTINE_RELEASED',
   'GAS_SPONSORSHIP_APPLIED',
   'GAS_SPONSORSHIP_CAP_EXCEEDED',
+  'GAS_SPONSORSHIP_FALLBACK_OWN_BALANCE', // real on-chain gas refund from the sub-wallet's own balance to the treasury (chainExecutor.ts's executeWithGasRefund)
   'RISK_ASSESSED',
   'TRUST_SCORE_CHANGED',
   'BUDGET_THRESHOLD_APPROACHED', // Section 12.7 - projected spend crossed an alert threshold on a pact cap

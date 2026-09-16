@@ -392,11 +392,17 @@ export async function completeBroadcast(id: string, executor: ChainExecutor): Pr
     throw new DomainError('Cannot broadcast: sub-wallet has no on-chain address yet', 'SUB_WALLET_NOT_DEPLOYED', 409);
   }
 
-  const { txHash, valueWei } = await executor.executeTransaction({
+  const { txHash, valueWei, gasRefundWei } = await executor.executeTransaction({
     subWalletAddress: subWallet.address,
     to: record.request.to,
     valueUsd: record.request.valueUsd,
     transactionId: record.id,
+    // Who actually pays gas on-chain (Section 6.10) - see chainExecutor.ts.
+    // Sponsored -> plain execute(), treasury eats the cost. Not sponsored
+    // (fallback to the sub-wallet's own balance) -> executeWithGasRefund(),
+    // a real ETH transfer back to the treasury read from the on-chain
+    // GasRefunded event, not an off-chain estimate.
+    sponsored: record.gasSponsored,
   });
 
   if (record.gasSponsored) {
@@ -409,6 +415,19 @@ export async function completeBroadcast(id: string, executor: ChainExecutor): Pr
       actorType: 'system',
       summary: `Gas sponsored via EIP-7702 delegation ($${record.simulation!.estimatedFeeUsd})`,
       metadata: { transactionId: record.id },
+    });
+  } else if (record.gasSponsorshipFallbackUsed) {
+    auditService.record({
+      enterpriseId: record.enterpriseId,
+      subWalletId: record.subWalletId,
+      eventType: 'GAS_SPONSORSHIP_FALLBACK_OWN_BALANCE',
+      actorUserId: null,
+      actorType: 'system',
+      summary:
+        gasRefundWei !== null
+          ? `Gas sponsorship cap exceeded - sub-wallet's own balance refunded ${gasRefundWei} wei of gas to the treasury on-chain`
+          : "Gas sponsorship cap exceeded - sub-wallet's own balance was billed for gas (no refund event observed)",
+      metadata: { transactionId: record.id, gasRefundWei },
     });
   }
 

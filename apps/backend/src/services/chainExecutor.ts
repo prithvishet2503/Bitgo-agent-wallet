@@ -40,6 +40,11 @@ export interface DeploySubWalletResult {
 export interface ExecuteTransactionResult {
   txHash: string;
   valueWei: string;
+  /** Non-null only when `sponsored: false` was requested and the sub-wallet's
+   * contract actually refunded some ETH for this call's gas (see
+   * AgentSubWallet.executeWithGasRefund) - the real on-chain amount read back
+   * from the `GasRefunded` event, not a computed estimate. */
+  gasRefundWei: string | null;
 }
 
 export interface ChainExecutorStatus {
@@ -63,12 +68,25 @@ export interface ChainExecutor {
    * real mode this calls the sub-wallet contract's owner-gated `execute()`
    * with a real wei value derived from `valueUsd` (see usdToWei below) - a
    * real, on-chain, gas-paying, value-moving transaction, not a
-   * zero-value ping. */
+   * zero-value ping.
+   *
+   * `sponsored` decides *who actually pays the gas*, on-chain (Section 6.10):
+   * the backend's treasury signer broadcasts every transaction either way (it
+   * holds the only signing key any sub-wallet recognizes as its owner), but
+   * - `sponsored: true` calls plain `execute()` - the treasury eats the gas
+   *   cost, so the transaction is genuinely gas-free for the agent/sub-wallet.
+   * - `sponsored: false` calls `executeWithGasRefund()` - the sub-wallet
+   *   contract reimburses the treasury for (an approximation of) this call's
+   *   gas cost from its *own* ETH balance, a real transfer read back from the
+   *   `GasRefunded` event. This is the fallback path
+   *   (gasSponsorshipService.ts's `own_balance` outcome) actually enforced
+   *   on-chain, not just recorded in an off-chain ledger. */
   executeTransaction(input: {
     subWalletAddress: string;
     to: string;
     valueUsd: number;
     transactionId: string;
+    sponsored: boolean;
   }): Promise<ExecuteTransactionResult>;
   /** Section 6.3 - pre-execution simulation of the exact call
    * `executeTransaction` would broadcast. Optional: mock mode doesn't
@@ -111,7 +129,7 @@ export class MockChainExecutor implements ChainExecutor {
   }
 
   async executeTransaction(): Promise<ExecuteTransactionResult> {
-    return { txHash: `0xmock_${randomUUID().replace(/-/g, '')}`, valueWei: '0' };
+    return { txHash: `0xmock_${randomUUID().replace(/-/g, '')}`, valueWei: '0', gasRefundWei: null };
   }
 
   async getStatus(): Promise<ChainExecutorStatus> {
@@ -124,7 +142,11 @@ const FACTORY_ABI = [
   'function computeAddress(address owner, string agentName, bytes32 salt) view returns (address)',
 ];
 
-const AGENT_SUB_WALLET_ABI = ['function execute(address to, uint256 value, bytes data) returns (bytes)'];
+const AGENT_SUB_WALLET_ABI = [
+  'function execute(address to, uint256 value, bytes data) returns (bytes)',
+  'function executeWithGasRefund(address to, uint256 value, bytes data) returns (bytes)',
+  'event GasRefunded(address indexed to, uint256 amount)',
+];
 
 /** Well-known, published Chainlink ETH/USD feed address - defaults to the
  * Sepolia one (matching our default RPC), overridable for other networks. */
@@ -236,11 +258,13 @@ export class RealChainExecutor implements ChainExecutor {
     subWalletAddress,
     to,
     valueUsd,
+    sponsored,
   }: {
     subWalletAddress: string;
     to: string;
     valueUsd: number;
     transactionId: string;
+    sponsored: boolean;
   }): Promise<ExecuteTransactionResult> {
     if (!ethers.isAddress(to)) {
       throw new Error(`"${to}" is not a valid on-chain address - real chain mode requires a real destination address`);
@@ -249,9 +273,39 @@ export class RealChainExecutor implements ChainExecutor {
     return this.serialize(async () => {
       const wallet = await this.keySource.getWallet(this.provider);
       const subWallet = new ethers.Contract(subWalletAddress, AGENT_SUB_WALLET_ABI, wallet);
-      const tx = await subWallet.execute(to, valueWei, '0x');
+
+      if (sponsored) {
+        // Treasury pays gas out of pocket, no refund - genuinely gas-free
+        // for the agent/sub-wallet.
+        const tx = await subWallet.execute(to, valueWei, '0x');
+        const receipt = await tx.wait();
+        return { txHash: receipt.hash, valueWei: valueWei.toString(), gasRefundWei: null };
+      }
+
+      // Not sponsored: the sub-wallet's own on-chain balance reimburses the
+      // treasury for this call's gas (executeWithGasRefund). estimateGas
+      // reliably under-shoots for this specific function - its binary search
+      // doesn't reproduce the exact gasleft() delta the real broadcast sees,
+      // so a tight limit can revert for a reason unrelated to the contract
+      // logic (observed directly against Sepolia while building this).
+      // Doubling the estimate is a blunt, verified-sufficient fix.
+      const gasEstimate = await subWallet.executeWithGasRefund.estimateGas(to, valueWei, '0x');
+      const tx = await subWallet.executeWithGasRefund(to, valueWei, '0x', { gasLimit: gasEstimate * 2n });
       const receipt = await tx.wait();
-      return { txHash: receipt.hash, valueWei: valueWei.toString() };
+
+      let gasRefundWei: string | null = null;
+      for (const log of receipt.logs) {
+        try {
+          const parsed = subWallet.interface.parseLog(log);
+          if (parsed?.name === 'GasRefunded') {
+            gasRefundWei = (parsed.args.amount as bigint).toString();
+            break;
+          }
+        } catch {
+          // not one of our events (e.g. the destination contract's own logs)
+        }
+      }
+      return { txHash: receipt.hash, valueWei: valueWei.toString(), gasRefundWei };
     });
   }
 

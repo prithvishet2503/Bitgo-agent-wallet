@@ -3,6 +3,7 @@ import { createApp } from './app.js';
 import { seedDemoData } from './store/db.js';
 import { startApprovalTimeoutSweeper } from './scheduler/approvalTimeoutSweeper.js';
 import { startSendQueueWorker } from './scheduler/sendQueueWorker.js';
+import { startScheduleSweeper } from './scheduler/scheduleSweeper.js';
 import { createX402Middleware } from './services/x402Service.js';
 
 // Catch async errors that would otherwise crash the process without a trace.
@@ -21,6 +22,7 @@ const port = Number(process.env.PORT ?? 4000);
 
 startApprovalTimeoutSweeper();
 startSendQueueWorker();
+startScheduleSweeper();
 
 app.listen(port, () => {
   // eslint-disable-next-line no-console

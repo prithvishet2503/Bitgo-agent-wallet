@@ -2,6 +2,7 @@
 import { Command } from 'commander';
 import { BitGoAgentWalletApiError, BitGoAgentWalletClient } from '@bitgo-agent-wallet/sdk';
 import { loadConfig, saveConfig } from './config.js';
+import { parseDayOfWeek, parseRunAt } from './scheduleTime.js';
 
 /**
  * Section 6.7 - Developer Tooling: CLI.
@@ -276,6 +277,157 @@ program
   .action((opts) =>
     run(async () => {
       printJson(await clientFromConfig().getRiskSummary(opts.subWalletId));
+    }),
+  );
+
+// --- Scheduled / recurring transactions - a saved template for `send`,
+// fired later by the backend's scheduleSweeper instead of synchronously.
+// Exactly one of --at (one-time) or --every (recurring) is required. ---
+program
+  .command('schedule-send')
+  .description(
+    'Schedule a one-time or recurring transaction, e.g. --at "tomorrow" / "next week", ' +
+      'or --every monthly --day-of-month 5',
+  )
+  .requiredOption('--sub-wallet-id <id>')
+  .requiredOption('--to <address>')
+  .option('--value-usd <usd>', 'Value in USD (specify this or --value-eth)')
+  .option('--value-eth <eth>', 'Value in ETH - converted to USD via the backend\'s live Chainlink price')
+  .option('--network <network>', 'Network', 'ethereum-mainnet')
+  .option('--contract-address <address>')
+  .option('--protocol <protocol>')
+  .option('--function-description <desc>', 'Human-readable description of the call', 'transfer')
+  .option(
+    '--at <when>',
+    'One-time: an ISO timestamp, "YYYY-MM-DD", or a shorthand like "tomorrow", "next week", "next monday", "in 3 days"',
+  )
+  .option('--every <recurrence>', 'Recurring: daily | weekly | monthly')
+  .option('--day-of-week <day>', 'Required for --every weekly - a weekday name (e.g. "monday") or 0-6 (0=Sunday)')
+  .option('--day-of-month <day>', 'Required for --every monthly - 1-31 (clamped to a short month\'s last day)')
+  .option('--time <HH:mm>', 'Time of day in UTC - used by --every, and by --at when it has no explicit time', '09:00')
+  .action((opts) =>
+    run(async () => {
+      if (!opts.at && !opts.every) {
+        throw new Error('Specify either --at <when> (one-time) or --every <daily|weekly|monthly> (recurring).');
+      }
+      if (opts.at && opts.every) {
+        throw new Error('Specify only one of --at or --every, not both.');
+      }
+      if (!opts.valueUsd && !opts.valueEth) {
+        throw new Error('Specify either --value-usd or --value-eth.');
+      }
+
+      const client = clientFromConfig();
+
+      let valueUsd: number;
+      if (opts.valueUsd) {
+        valueUsd = Number(opts.valueUsd);
+      } else {
+        const status = await client.getChainStatus();
+        if (!status.ethUsdPrice) {
+          throw new Error(
+            'Cannot convert --value-eth to USD: no live ETH/USD price available from GET /chain/status ' +
+              '(the backend is likely running in mock chain mode). Use --value-usd instead.',
+          );
+        }
+        valueUsd = Number(opts.valueEth) * status.ethUsdPrice;
+        console.log(`Converted ${opts.valueEth} ETH -> $${valueUsd.toFixed(2)} at the live rate of $${status.ethUsdPrice.toFixed(2)}/ETH`);
+      }
+
+      const base = {
+        subWalletId: opts.subWalletId,
+        to: opts.to,
+        valueUsd,
+        network: opts.network,
+        contractAddress: opts.contractAddress ?? null,
+        protocol: opts.protocol ?? null,
+        functionDescription: opts.functionDescription,
+      };
+
+      if (opts.at) {
+        const runAt = parseRunAt(opts.at, opts.time);
+        printJson(
+          await client.createSchedule({ ...base, recurrence: 'once', runAt, dayOfWeek: null, dayOfMonth: null, timeOfDayUtc: null }),
+        );
+        return;
+      }
+
+      if (!['daily', 'weekly', 'monthly'].includes(opts.every)) {
+        throw new Error('--every must be one of: daily, weekly, monthly');
+      }
+      let dayOfWeek: number | null = null;
+      let dayOfMonth: number | null = null;
+      if (opts.every === 'weekly') {
+        if (!opts.dayOfWeek) throw new Error('--every weekly requires --day-of-week');
+        dayOfWeek = parseDayOfWeek(opts.dayOfWeek);
+      }
+      if (opts.every === 'monthly') {
+        if (!opts.dayOfMonth) throw new Error('--every monthly requires --day-of-month');
+        dayOfMonth = Number(opts.dayOfMonth);
+        if (!Number.isInteger(dayOfMonth) || dayOfMonth < 1 || dayOfMonth > 31) {
+          throw new Error('--day-of-month must be an integer between 1 and 31');
+        }
+      }
+      printJson(
+        await client.createSchedule({
+          ...base,
+          recurrence: opts.every,
+          runAt: null,
+          dayOfWeek,
+          dayOfMonth,
+          timeOfDayUtc: opts.time,
+        }),
+      );
+    }),
+  );
+
+program
+  .command('list-schedules')
+  .description('List scheduled/recurring transactions')
+  .option('--sub-wallet-id <id>')
+  .action((opts) =>
+    run(async () => {
+      printJson(await clientFromConfig().listSchedules(opts.subWalletId));
+    }),
+  );
+
+program
+  .command('get-schedule')
+  .description('Get a scheduled transaction, including its run history')
+  .requiredOption('--schedule-id <id>')
+  .action((opts) =>
+    run(async () => {
+      printJson(await clientFromConfig().getSchedule(opts.scheduleId));
+    }),
+  );
+
+program
+  .command('cancel-schedule')
+  .description('Permanently cancel a scheduled transaction')
+  .requiredOption('--schedule-id <id>')
+  .action((opts) =>
+    run(async () => {
+      printJson(await clientFromConfig().cancelSchedule(opts.scheduleId));
+    }),
+  );
+
+program
+  .command('pause-schedule')
+  .description('Pause a recurring/one-time schedule without cancelling it')
+  .requiredOption('--schedule-id <id>')
+  .action((opts) =>
+    run(async () => {
+      printJson(await clientFromConfig().pauseSchedule(opts.scheduleId));
+    }),
+  );
+
+program
+  .command('resume-schedule')
+  .description('Resume a paused schedule (a past-due "once" schedule fires on the very next sweep)')
+  .requiredOption('--schedule-id <id>')
+  .action((opts) =>
+    run(async () => {
+      printJson(await clientFromConfig().resumeSchedule(opts.scheduleId));
     }),
   );
 

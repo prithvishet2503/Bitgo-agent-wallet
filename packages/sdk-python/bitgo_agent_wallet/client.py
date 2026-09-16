@@ -146,3 +146,24 @@ class BitGoAgentWalletClient:
 
     def release_quarantine(self, incoming_transaction_id: str, note: Optional[str] = None) -> dict:
         return self._request("POST", f"/incoming/{incoming_transaction_id}/release", {"note": note})
+
+    # --- Scheduled / recurring transactions - a saved template for `send`,
+    # fired later by the backend's scheduleSweeper instead of synchronously. ---
+    def create_schedule(self, **input: Any) -> dict:
+        return self._request("POST", "/schedules", input)
+
+    def list_schedules(self, sub_wallet_id: Optional[str] = None) -> list[dict]:
+        qs = f"?subWalletId={sub_wallet_id}" if sub_wallet_id else ""
+        return self._request("GET", f"/schedules{qs}")
+
+    def get_schedule(self, schedule_id: str) -> dict:
+        return self._request("GET", f"/schedules/{schedule_id}")
+
+    def cancel_schedule(self, schedule_id: str) -> dict:
+        return self._request("POST", f"/schedules/{schedule_id}/cancel")
+
+    def pause_schedule(self, schedule_id: str) -> dict:
+        return self._request("POST", f"/schedules/{schedule_id}/pause")
+
+    def resume_schedule(self, schedule_id: str) -> dict:
+        return self._request("POST", f"/schedules/{schedule_id}/resume")

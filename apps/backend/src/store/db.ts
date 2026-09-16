@@ -12,6 +12,7 @@ import type {
   Role,
   SendQueueEntry,
   TransactionRecord,
+  TransactionSchedule,
 } from '@bitgo-agent-wallet/shared';
 import { SqliteBackedList, SqliteBackedMap, getSqliteConnection } from './sqliteMap.js';
 
@@ -77,6 +78,7 @@ class Db {
   approvalRequests = makeMap<ApprovalRequest>('approval_requests');
   incomingTransactions = makeMap<IncomingTransaction>('incoming_transactions');
   sendQueue = makeMap<SendQueueEntry>('send_queue');
+  schedules = makeMap<TransactionSchedule>('schedules');
   auditLog = makeList<AuditLogEntry>('audit_log');
   gasSponsorshipLedger = makeList<GasSponsorshipLedgerEntry>('gas_sponsorship_ledger');
 
@@ -91,6 +93,7 @@ class Db {
     this.approvalRequests.clear();
     this.incomingTransactions.clear();
     this.sendQueue.clear();
+    this.schedules.clear();
     this.auditLog.clear();
     this.gasSponsorshipLedger.clear();
   }

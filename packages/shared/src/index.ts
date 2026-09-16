@@ -12,3 +12,4 @@ export * from './types/incomingScreening.js';
 export * from './types/gasSponsorship.js';
 export * from './types/sendQueue.js';
 export * from './types/risk.js';
+export * from './types/schedule.js';

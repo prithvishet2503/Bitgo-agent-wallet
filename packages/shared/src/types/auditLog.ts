@@ -35,6 +35,13 @@ export const AuditEventTypeSchema = z.enum([
   'RISK_ASSESSED',
   'TRUST_SCORE_CHANGED',
   'BUDGET_THRESHOLD_APPROACHED', // Section 12.7 - projected spend crossed an alert threshold on a pact cap
+  'SCHEDULE_CREATED',
+  'SCHEDULE_CANCELLED',
+  'SCHEDULE_PAUSED',
+  'SCHEDULE_RESUMED',
+  'SCHEDULE_TRIGGERED', // scheduleSweeper fired a due schedule and handed it to submitTransaction
+  'SCHEDULE_RUN_FAILED', // the schedule's submitTransaction call itself threw (not a normal deny/block outcome)
+  'SCHEDULE_COMPLETED', // a "once" schedule ran its one and only occurrence
 ]);
 export type AuditEventType = z.infer<typeof AuditEventTypeSchema>;
 

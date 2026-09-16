@@ -12,6 +12,7 @@ import { incomingRouter } from './routes/incoming.js';
 import { screeningRouter } from './routes/screening.js';
 import { chainRouter } from './routes/chain.js';
 import { riskRouter } from './routes/risk.js';
+import { schedulesRouter } from './routes/schedules.js';
 import { authMiddleware } from './middleware/auth.js';
 import { resolveEnterprise } from './middleware/enterprise.js';
 import { errorHandler } from './middleware/errorHandler.js';
@@ -54,6 +55,7 @@ export function createApp(x402Middleware?: RequestHandler | null): Express {
   app.use('/api/v1/sub-wallets', subWalletsRouter);
   app.use('/api/v1/pacts', pactsRouter);
   app.use('/api/v1/transactions', transactionsRouter);
+  app.use('/api/v1/schedules', schedulesRouter);
   app.use('/api/v1/approvals', approvalsRouter);
   app.use('/api/v1/audit-log', auditLogRouter);
   app.use('/api/v1/incoming', incomingRouter);

@@ -25,7 +25,7 @@ packages/sdk-python  Python SDK - mirrors the TS client (Section 6.7: "at minimu
 packages/contracts   Prototype/demo smart contracts (Hardhat), deployed live to Sepolia testnet
 apps/backend         Express API + all governance business logic (in-memory store)
 apps/frontend        React admin console (Vite) - the institutional/compliance UI
-apps/cli             CLI (Section 6.7: authenticate, create-agent-wallet, send, get-balance, get-status, revoke, ...)
+apps/cli             CLI (Section 6.7: authenticate, create-agent-wallet, send, schedule-send, get-balance, get-status, revoke, ...)
 apps/mcp-server      MCP server (Section 6.7) - lets agent frameworks call the wallet directly
 ```
 
@@ -204,6 +204,45 @@ A transaction submitted while its sub-wallet is still `pendingDeployment` is
 denied immediately (`SUB_WALLET_NOT_DEPLOYED`) rather than racing ahead of a
 deployment that, in real mode, hasn't actually landed on-chain yet.
 
+### Scheduled / recurring transactions
+
+Not an explicit PRD v1 section - a fast-follow built as a thin layer on top of
+everything above, deliberately with no new governance path: a `TransactionSchedule`
+(`packages/shared/src/types/schedule.ts`) is just a saved template for the same
+request `POST /transactions` accepts. A poller
+(`scheduler/scheduleSweeper.ts`, every 30s) finds schedules whose `nextRunAt`
+has arrived and hands each one to the *exact same*
+`transactionService.submitTransaction()` a manual `send` calls -
+`scheduledTransactionService.ts` never signs or broadcasts anything itself, so
+every Pact cap, screening check, risk-tier escalation, and the kill switch
+applies identically to a scheduled send. A schedule firing can end up
+`executed`, `pending_approval`, `policy_denied`, or `screening_blocked` exactly
+like any other transaction - see the linked `TransactionRecord`
+(`lastRunTransactionId`) for what actually happened.
+
+Four recurrence types (`recurrence` field): `once` (a single `runAt`
+timestamp), `daily`, `weekly` (`dayOfWeek`, 0=Sunday), and `monthly`
+(`dayOfMonth`, 1-31 - clamped to a short month's actual last day, e.g. day 31
+in February, rather than skipping that month). `computeNextRunAt` is a pure,
+independently-tested function (`apps/backend/src/services/schedule.test.ts`).
+A due schedule "claims" itself (advances `nextRunAt`, or
+marks a `once` schedule `completed`) *before* the async governance pipeline
+runs, so a slow screening lookup spanning two sweeper ticks can't cause a
+double-fire - the same class of race `chainExecutor.ts`'s SendQueue
+serialization already guards against, applied here to scheduling instead of
+nonces.
+
+CLI (`schedule-send`) accepts either a one-time `--at` (an ISO timestamp,
+`"YYYY-MM-DD"`, or shorthand like `"tomorrow"`, `"next week"`, `"next monday"`,
+`"in 3 days"` - see `apps/cli/src/scheduleTime.ts`) or a recurring `--every
+daily|weekly|monthly`. Value can be given as `--value-usd` (matching every
+other command) or `--value-eth`, which converts to USD via the backend's live
+Chainlink price (`GET /chain/status`) rather than a hardcoded rate - a real
+conversion, not a guess. `list-schedules` / `get-schedule` /
+`cancel-schedule` / `pause-schedule` / `resume-schedule` round out the
+lifecycle; resuming a paused `once` schedule whose original time has already
+passed fires it on the very next sweep rather than silently dropping it.
+
 ## PRD section → code map
 
 | PRD section | Implementation |
@@ -220,6 +259,7 @@ deployment that, in real mode, hasn't actually landed on-chain yet.
 | 6.10 Gas Sponsorship (EIP-7702) | `apps/backend/src/services/gasSponsorshipService.ts`, `chainExecutor.ts`, `sendQueueService.ts` |
 | RBAC (named permissions) | `packages/shared/src/types/permissions.ts` |
 | Organization/Enterprise signup | `apps/backend/src/services/organizationService.ts`, `enterpriseService.ts` |
+| Scheduled / recurring transactions (fast-follow, not an explicit v1 section) | `apps/backend/src/services/scheduledTransactionService.ts`, `scheduler/scheduleSweeper.ts` |
 
 Every service file has a doc comment citing the exact PRD section (or BitGo
 microservice pattern) it implements.
@@ -275,6 +315,9 @@ node dist/index.js create-agent-wallet --name "Treasury Bot" --allocated-balance
 node dist/index.js create-pact --sub-wallet-id <id> --max-tx-value 5000 --daily-cap 20000 --weekly-cap 50000
 node dist/index.js send --sub-wallet-id <id> --to 0xdest1 --value-usd 1000
 node dist/index.js get-status --transaction-id <id>
+node dist/index.js schedule-send --sub-wallet-id <id> --to 0xdest1 --value-usd 500 --at "next monday"
+node dist/index.js schedule-send --sub-wallet-id <id> --to 0xdest1 --value-usd 5000 --every monthly --day-of-month 5
+node dist/index.js list-schedules --sub-wallet-id <id>
 node dist/index.js revoke --sub-wallet-id <id> --reason "compromised key"
 node dist/index.js create-enterprise --name "Trading Desk"   # additional Enterprise under your Organization
 node dist/index.js use-enterprise --enterprise-id <id>       # switch which one commands act on
@@ -427,13 +470,16 @@ cd apps/backend
 npm test
 ```
 
-50 tests cover the governance surface end-to-end: pact cap math (including
+60 tests cover the governance surface end-to-end: pact cap math (including
 the approved+executed committed-spend rule that prevents queue races),
 allow/denylists, session expiry, risk-tier boundaries and severity floors,
 trust-score accounting (simulation failures counted separately from policy
 violations), the approval flow (role gating, $25k multi-approver threshold,
 single-deny, deny-on-timeout), the full submission pipeline (auto-execute,
 escalation, screening blocks, kill switch, no-pact), budget-alert threshold
-crossing and dedup, and both screening fail modes. Fully hermetic: every
-network fetch is mocked and storage is in-memory. CI runs build + tests on
-Node 20/22/24 (`.github/workflows/ci.yml`).
+crossing and dedup, both screening fail modes, and scheduled-transaction
+recurrence math + firing (`computeNextRunAt` for all four recurrence types,
+a due schedule going through the exact same policy pipeline as a manual
+send, double-fire prevention, and the pause/resume/cancel lifecycle). Fully
+hermetic: every network fetch is mocked and storage is in-memory. CI runs
+build + tests on Node 20/22/24 (`.github/workflows/ci.yml`).

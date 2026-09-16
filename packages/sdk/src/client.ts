@@ -8,6 +8,7 @@ import type {
   CreateEnterpriseRequestInput,
   CreateOrganizationInput,
   CreatePactInput,
+  CreateTransactionScheduleInput,
   Enterprise,
   IncomingTransaction,
   Organization,
@@ -17,6 +18,7 @@ import type {
   SubWalletRiskSummary,
   TransactionRecord,
   TransactionRequestInput,
+  TransactionSchedule,
 } from '@bitgo-agent-wallet/shared';
 import type { ClientEvmSigner } from './x402.js';
 import { createPaymentHeaders } from './x402.js';
@@ -270,6 +272,47 @@ export class BitGoAgentWalletClient {
 
   async releaseQuarantine(input: Omit<ReleaseQuarantineInput, 'releasedByUserId'>): Promise<IncomingTransaction> {
     return this.request('POST', `/incoming/${input.incomingTransactionId}/release`, { note: input.note });
+  }
+
+  // --- Scheduled / recurring transactions - a saved template for `send`,
+  // fired later by the backend's scheduleSweeper instead of synchronously.
+  // See packages/shared/src/types/schedule.ts. ---
+  async createSchedule(input: CreateTransactionScheduleInput): Promise<TransactionSchedule> {
+    return this.request('POST', '/schedules', input);
+  }
+
+  async listSchedules(subWalletId?: string): Promise<TransactionSchedule[]> {
+    const qs = subWalletId ? `?subWalletId=${encodeURIComponent(subWalletId)}` : '';
+    return this.request('GET', `/schedules${qs}`);
+  }
+
+  async getSchedule(id: string): Promise<TransactionSchedule> {
+    return this.request('GET', `/schedules/${id}`);
+  }
+
+  async cancelSchedule(id: string): Promise<TransactionSchedule> {
+    return this.request('POST', `/schedules/${id}/cancel`);
+  }
+
+  async pauseSchedule(id: string): Promise<TransactionSchedule> {
+    return this.request('POST', `/schedules/${id}/pause`);
+  }
+
+  async resumeSchedule(id: string): Promise<TransactionSchedule> {
+    return this.request('POST', `/schedules/${id}/resume`);
+  }
+
+  // --- Section 6.10 / chainExecutor.ts: chain status transparency endpoint,
+  // including the live Chainlink ETH/USD price - used by the CLI's
+  // `schedule-send --value-eth` convenience conversion. ---
+  async getChainStatus(): Promise<{
+    mode: 'mock' | 'real';
+    signerAddress?: string;
+    custody?: string;
+    treasuryBalanceEth?: string;
+    ethUsdPrice?: number;
+  }> {
+    return this.request('GET', '/chain/status');
   }
 }
 
